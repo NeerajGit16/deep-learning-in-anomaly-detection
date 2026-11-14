@@ -1,5 +1,8 @@
 """Baseline detectors.
 
+Per-sensor checks (rolling z, EWMA, CUSUM), PCA, Isolation Forest, Matrix Profile, and the
+link-residual detectors that predict each sensor from the others (straight and curved).
+
 Every detector is fitted on normal data and returns one score per time step:
 
     det = make("pca").fit(X_fit)    # X_fit: (n, d) normal data
@@ -208,6 +211,120 @@ class MatrixProfileAB(Detector):
         return self._profile(X, self_join=True)
 
 
+# ---------------------------------------------------------------- links between sensors
+#
+# These live here, not in structure.py, so that structure.py can import this module and this
+# module never has to import structure.py back.
+
+def blocked_folds(n: int, k: int = 5) -> list[np.ndarray]:
+    """k contiguous blocks of time. Shuffled folds would leak, because neighbours in time look alike."""
+    return [idx for idx in np.array_split(np.arange(n), k) if len(idx)]
+
+
+def _straight():
+    from sklearn.linear_model import RidgeCV
+    return RidgeCV(alphas=np.logspace(-3, 3, 13))
+
+
+def _flexible(seed: int = 0):
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    return HistGradientBoostingRegressor(max_iter=150, learning_rate=0.05, max_depth=3,
+                                         min_samples_leaf=10, l2_regularization=1.0, random_state=seed)
+
+
+class LinkResidual(Detector):
+    """Predict each sensor from the others; score = largest surprise across sensors.
+
+    curved=False uses straight-line models only; curved=True adds a flexible model on top.
+    A surprise is either one reading far off its prediction, or the average of the last
+    `window` readings being off. Both are measured against held-out errors on the fit data.
+    """
+    name = "Link residual"
+
+    def __init__(self, curved: bool = False, window: int = 5, k: int = 5, seed: int = 0):
+        self.curved, self.window, self.k, self.seed = curved, window, k, seed
+        self.name = "Curved-link residual" if curved else "Straight-link residual"
+
+    def _fit_pair(self, A, y):
+        if A.shape[1] == 0:              # no other sensor varies: nothing to predict from
+            return None, None
+        m1 = _straight().fit(A, y)
+        m2 = _flexible(self.seed).fit(A, y - m1.predict(A)) if self.curved else None
+        return m1, m2
+
+    @staticmethod
+    def _predict(m1, m2, A):
+        if m1 is None:                   # predict the sensor's normal level (0 in standardised units)
+            return np.zeros(len(A))
+        p = m1.predict(A)
+        return p if m2 is None else p + m2.predict(A)
+
+    def fit(self, X):
+        super().fit(X)
+        Z = self._z(X)
+        self.live_ = X.std(0) > 1e-9
+        self.models_ = {}
+        for j in np.flatnonzero(self.live_):
+            others = self.live_.copy()
+            others[j] = False
+            self.models_[j] = (others, *self._fit_pair(Z[:, others], Z[:, j]))
+        err = Z - self._held_out(Z)
+        now, avg = np.abs(err), np.abs(_trailing_mean(err, self.window))
+        self.ref_now_ = np.maximum(np.quantile(now, 0.99, axis=0), 1e-9)
+        self.ref_avg_ = np.maximum(np.quantile(avg, 0.99, axis=0), 1e-9)
+        self.fit_scores_ = self._combine(err)
+        return self
+
+    def _held_out(self, Z):
+        """Each sensor's prediction on blocks of time its models were not fitted on."""
+        pred = np.zeros_like(Z)
+        for test in blocked_folds(len(Z), self.k):
+            train = np.setdiff1d(np.arange(len(Z)), test)
+            for j, (others, _, _) in self.models_.items():
+                m1, m2 = self._fit_pair(Z[train][:, others], Z[train, j])
+                pred[test, j] = self._predict(m1, m2, Z[test][:, others])
+        return pred
+
+    def _combine(self, err):
+        now = np.abs(err) / self.ref_now_
+        avg = np.abs(_trailing_mean(err, self.window)) / self.ref_avg_
+        return np.maximum(now, avg).max(1)
+
+    def errors(self, X):
+        Z = self._z(X)
+        err = np.zeros_like(Z)
+        for j, (others, m1, m2) in self.models_.items():
+            err[:, j] = Z[:, j] - self._predict(m1, m2, Z[:, others])
+        return err
+
+    def score(self, X):
+        return self._combine(self.errors(X))
+
+    def score_fit(self, X):
+        return self.fit_scores_          # held-out, so the reference scale is honest
+
+
+class StraightLinkResidual(LinkResidual):
+    """LinkResidual with straight-line models only, as one registry entry."""
+    name = "Straight-link residual"
+
+    def __init__(self, window: int = 5, k: int = 5):
+        super().__init__(curved=False, window=window, k=k)
+
+
+class CurvedLinkResidual(LinkResidual):
+    """LinkResidual with the flexible model added, as one registry entry.
+
+    Not marked stochastic: with fewer than 10,000 fit rows the boosted trees give the same
+    answer for every seed (scikit-learn only draws random numbers above that size, for early
+    stopping). Fitted on more rows than that, the seed starts to matter.
+    """
+    name = "Curved-link residual"
+
+    def __init__(self, window: int = 5, k: int = 5, seed: int = 0):
+        super().__init__(curved=True, window=window, k=k, seed=seed)
+
+
 REGISTRY = {
     "rolling_z": RollingZ,
     "ewma": EWMA,
@@ -215,6 +332,8 @@ REGISTRY = {
     "pca": PCA,
     "iforest": IsolationForestW,
     "matrix_profile": MatrixProfileAB,
+    "link_straight": StraightLinkResidual,
+    "link_curved": CurvedLinkResidual,
 }
 
 

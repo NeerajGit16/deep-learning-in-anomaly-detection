@@ -17,22 +17,9 @@ import pandas as pd
 from . import detectors as det
 from . import metrics as M
 from .data import Dataset
-
-
-def blocked_folds(n: int, k: int = 5) -> list[np.ndarray]:
-    """k contiguous blocks of time. Shuffled folds would leak, because neighbours in time look alike."""
-    return [idx for idx in np.array_split(np.arange(n), k) if len(idx)]
-
-
-def _straight():
-    from sklearn.linear_model import RidgeCV
-    return RidgeCV(alphas=np.logspace(-3, 3, 13))
-
-
-def _flexible(seed: int = 0):
-    from sklearn.ensemble import HistGradientBoostingRegressor
-    return HistGradientBoostingRegressor(max_iter=150, learning_rate=0.05, max_depth=3,
-                                         min_samples_leaf=10, l2_regularization=1.0, random_state=seed)
+# The link-residual detector and its models live in detectors.py (next to the registry).
+# They are imported here so structure.LinkResidual and structure.blocked_folds keep working.
+from .detectors import LinkResidual, _flexible, _straight, blocked_folds  # noqa: F401
 
 
 def _standardise(X: np.ndarray):
@@ -104,68 +91,6 @@ def curvature_summary(X: np.ndarray, channels: list[str], k: int = 5, seed: int 
 
 
 # ---------------------------------------------------------------- what kind of fault is each fault?
-
-class LinkResidual(det.Detector):
-    """Predict each sensor from the others; score = largest surprise across sensors.
-
-    curved=False uses straight-line models only; curved=True adds a flexible model on top.
-    A surprise is either one reading far off its prediction, or the average of the last
-    `window` readings being off. Both are measured against held-out errors on the fit data.
-    """
-    name = "Link residual"
-
-    def __init__(self, curved: bool = False, window: int = 5, k: int = 5, seed: int = 0):
-        self.curved, self.window, self.k, self.seed = curved, window, k, seed
-        self.name = "Curved-link residual" if curved else "Straight-link residual"
-
-    def fit(self, X):
-        super().fit(X)
-        Z = self._z(X)
-        self.live_ = X.std(0) > 1e-9
-        self.models_ = {}
-        for j in np.flatnonzero(self.live_):
-            others = self.live_.copy()
-            others[j] = False
-            m1 = _straight().fit(Z[:, others], Z[:, j])
-            m2 = _flexible(self.seed).fit(Z[:, others], Z[:, j] - m1.predict(Z[:, others])) if self.curved else None
-            self.models_[j] = (others, m1, m2)
-        pred = held_out_predictions(X, self.k, self.seed)[2] if self.curved else self._cv_lin(Z)
-        err = Z - pred
-        now, avg = np.abs(err), np.abs(det._trailing_mean(err, self.window))
-        self.ref_now_ = np.maximum(np.quantile(now, 0.99, axis=0), 1e-9)
-        self.ref_avg_ = np.maximum(np.quantile(avg, 0.99, axis=0), 1e-9)
-        self.fit_scores_ = self._combine(err)
-        return self
-
-    def _cv_lin(self, Z):
-        lin = np.zeros_like(Z)
-        for test in blocked_folds(len(Z), self.k):
-            train = np.setdiff1d(np.arange(len(Z)), test)
-            for j, (others, _, _) in self.models_.items():
-                lin[test, j] = _straight().fit(Z[train][:, others], Z[train, j]).predict(Z[test][:, others])
-        return lin
-
-    def _combine(self, err):
-        now = np.abs(err) / self.ref_now_
-        avg = np.abs(det._trailing_mean(err, self.window)) / self.ref_avg_
-        return np.maximum(now, avg).max(1)
-
-    def errors(self, X):
-        Z = self._z(X)
-        err = np.zeros_like(Z)
-        for j, (others, m1, m2) in self.models_.items():
-            p = m1.predict(Z[:, others])
-            if m2 is not None:
-                p = p + m2.predict(Z[:, others])
-            err[:, j] = Z[:, j] - p
-        return err
-
-    def score(self, X):
-        return self._combine(self.errors(X))
-
-    def score_fit(self, X):
-        return self.fit_scores_          # held-out, so the reference scale is honest
-
 
 def _scores(ds: Dataset, make_detector) -> list[np.ndarray]:
     fitted, out = {}, []

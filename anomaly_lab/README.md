@@ -37,8 +37,8 @@ uv run pytest                            # checks everything works
 | `adlab/data.py` | Loads SKAB and Tennessee Eastman; plain-English sensor tables (`SKAB_INFO`, `TEP_INFO`) |
 | `adlab/explore.py` | Summary tables: faults per kind, how far each sensor moves, which sensors move together |
 | `adlab/plots.py` | All the figures |
-| `adlab/detectors.py` | The six simple detectors |
-| `adlab/structure.py` | Curvature measure, fault labelling, straight-link and curved-link residual detectors |
+| `adlab/detectors.py` | The six simple detectors, plus the straight-link and curved-link residual detectors |
+| `adlab/structure.py` | Curvature measure and fault labelling |
 | `adlab/simulate.py` | A first small simulator with a curvature dial |
 | `adlab/metrics.py` | Catch rate at a fixed false-alarm rate, and other scores |
 | `adlab/stats.py` | How much of a result could be luck (resampling) |

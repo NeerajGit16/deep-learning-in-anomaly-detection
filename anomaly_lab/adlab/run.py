@@ -31,6 +31,8 @@ METHODS = {
     "pca": {"var": 0.90},
     "iforest": {"window": 10, "n_estimators": 100},
     "matrix_profile": {"m": 16},
+    "link_straight": {"window": 5},
+    "link_curved": {"window": 5},
 }
 FAR = 0.01
 

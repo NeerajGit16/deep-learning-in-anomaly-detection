@@ -11,3 +11,7 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 *.egg-info/
+
+# 2022 summer project: kept on disk, out of the repo
+2022 YRF Work/
+2022 YRF Literature/

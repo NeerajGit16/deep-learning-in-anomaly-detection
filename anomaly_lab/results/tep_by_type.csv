@@ -125,3 +125,45 @@ Matrix Profile,18 unknown,0.89625
 Matrix Profile,19 unknown,0.9125
 Matrix Profile,20 unknown,0.73
 Matrix Profile,21 valve stuck: stream 4,0.5375
+Straight-link residual,01 step: A/C feed ratio,0.9975
+Straight-link residual,02 step: B composition,0.9875
+Straight-link residual,03 step: D feed temperature,0.01125
+Straight-link residual,04 step: reactor cooling water temp,1.0
+Straight-link residual,05 step: condenser cooling water temp,1.0
+Straight-link residual,06 step: A feed loss,1.0
+Straight-link residual,07 step: C header pressure loss,1.0
+Straight-link residual,"08 random: A, B, C feed composition",0.9775
+Straight-link residual,09 random: D feed temperature,0.02
+Straight-link residual,10 random: C feed temperature,0.92625
+Straight-link residual,11 random: reactor cooling water temp,0.925
+Straight-link residual,12 random: condenser cooling water temp,0.99875
+Straight-link residual,13 drift: reaction kinetics,0.955
+Straight-link residual,14 sticking: reactor cooling water valve,0.99875
+Straight-link residual,15 sticking: condenser cooling water valve,0.04375
+Straight-link residual,16 unknown,0.9575
+Straight-link residual,17 unknown,0.9775
+Straight-link residual,18 unknown,0.8975
+Straight-link residual,19 unknown,0.955
+Straight-link residual,20 unknown,0.9175
+Straight-link residual,21 valve stuck: stream 4,0.50875
+Curved-link residual,01 step: A/C feed ratio,0.9975
+Curved-link residual,02 step: B composition,0.9875
+Curved-link residual,03 step: D feed temperature,0.025
+Curved-link residual,04 step: reactor cooling water temp,1.0
+Curved-link residual,05 step: condenser cooling water temp,1.0
+Curved-link residual,06 step: A feed loss,1.0
+Curved-link residual,07 step: C header pressure loss,1.0
+Curved-link residual,"08 random: A, B, C feed composition",0.975
+Curved-link residual,09 random: D feed temperature,0.0175
+Curved-link residual,10 random: C feed temperature,0.905
+Curved-link residual,11 random: reactor cooling water temp,0.915
+Curved-link residual,12 random: condenser cooling water temp,0.99875
+Curved-link residual,13 drift: reaction kinetics,0.955
+Curved-link residual,14 sticking: reactor cooling water valve,0.99875
+Curved-link residual,15 sticking: condenser cooling water valve,0.05875
+Curved-link residual,16 unknown,0.94625
+Curved-link residual,17 unknown,0.9775
+Curved-link residual,18 unknown,0.90125
+Curved-link residual,19 unknown,0.9425
+Curved-link residual,20 unknown,0.92
+Curved-link residual,21 valve stuck: stream 4,0.52875

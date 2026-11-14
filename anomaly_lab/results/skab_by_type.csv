@@ -41,3 +41,17 @@ Matrix Profile,hot water inflow,0.7350993377483444
 Matrix Profile,rotor imbalance,0.7660820229028928
 Matrix Profile,inlet valve closed,0.5341303909638003
 Matrix Profile,outlet valve closed,0.4488013892579208
+Straight-link residual,fluid leak or addition,0.6835825172410215
+Straight-link residual,water level change,0.3651877133105802
+Straight-link residual,cavitation,0.37702265372168287
+Straight-link residual,hot water inflow,0.7516556291390728
+Straight-link residual,rotor imbalance,0.7984100391578818
+Straight-link residual,inlet valve closed,0.6536500709787746
+Straight-link residual,outlet valve closed,0.6210045810122916
+Curved-link residual,fluid leak or addition,0.6015108455563909
+Curved-link residual,water level change,0.3677474402730375
+Curved-link residual,cavitation,0.37890944617451305
+Curved-link residual,hot water inflow,0.7516556291390728
+Curved-link residual,rotor imbalance,0.7989087922750888
+Curved-link residual,inlet valve closed,0.6149473769868656
+Curved-link residual,outlet valve closed,0.5529972432112122
