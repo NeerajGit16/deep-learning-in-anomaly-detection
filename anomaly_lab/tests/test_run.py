@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 
 from adlab import detectors as det
+from adlab import metrics as M
 from adlab import run
 from adlab.data import Dataset, Run
 
@@ -56,6 +57,13 @@ def test_link_residuals_go_through_scoring_and_report(tmp_path, monkeypatch):
     assert by_group[("Straight-link residual", "link break")] > 0.8
     assert by_group[("Rolling z-score", "link break")] < 0.3
     assert len(res["pairs"]) == 3
+    # the margin is a fixed constant; the measured wobble is reported next to it but does not set it
+    assert res["noise"]["margin"] == run.MARGIN == 0.12
+    assert res["noise"]["median_pair_sd"] > 0
+    # VUS-PR appears only when the optional TSB-AD package is installed, never as "nan"
+    report = run._markdown({"toy": res})
+    assert ("VUS-PR" in report) == M.vus_available() == ("vus_pr_mean" in res["summary"][0])
+    assert "nan" not in report and "0.12" in report
 
 
 def test_changing_a_setting_gives_a_new_cache_file(monkeypatch):

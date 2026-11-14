@@ -228,8 +228,13 @@ def _straight():
 
 def _flexible(seed: int = 0):
     from sklearn.ensemble import HistGradientBoostingRegressor
+    # early_stopping=False: by default scikit-learn switches early stopping on above 10,000 rows,
+    # holding out a random tenth of the data, which would make the result depend on the seed and
+    # on the data size. Switched off, the trees use no random numbers, so the same data always
+    # gives the same model. Below 10,000 rows this changes nothing.
     return HistGradientBoostingRegressor(max_iter=150, learning_rate=0.05, max_depth=3,
-                                         min_samples_leaf=10, l2_regularization=1.0, random_state=seed)
+                                         min_samples_leaf=10, l2_regularization=1.0, random_state=seed,
+                                         early_stopping=False)
 
 
 class LinkResidual(Detector):
@@ -315,9 +320,8 @@ class StraightLinkResidual(LinkResidual):
 class CurvedLinkResidual(LinkResidual):
     """LinkResidual with the flexible model added, as one registry entry.
 
-    Not marked stochastic: with fewer than 10,000 fit rows the boosted trees give the same
-    answer for every seed (scikit-learn only draws random numbers above that size, for early
-    stopping). Fitted on more rows than that, the seed starts to matter.
+    Not marked stochastic: the boosted trees are set up to use no random numbers (see
+    _flexible), so every seed gives the same scores whatever the size of the fit data.
     """
     name = "Curved-link residual"
 

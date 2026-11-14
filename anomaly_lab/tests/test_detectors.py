@@ -105,9 +105,14 @@ def test_moving_the_detector_did_not_change_its_reference_errors():
         np.testing.assert_allclose(model.score_fit(fit), model._combine(Z - pred))
 
 
-def test_curved_link_residual_gives_the_same_scores_for_every_seed():
-    """Why it is not marked stochastic: on fit data this small the boosted trees use no random numbers."""
-    fit, X, _ = _step_case()
+@pytest.mark.parametrize("rows", [400, 10_500])
+def test_curved_link_residual_gives_the_same_scores_for_every_seed(rows):
+    """Why it is not marked stochastic. 10,500 rows is above the size where scikit-learn would
+    otherwise switch on early stopping with a random hold-out."""
+    rng = np.random.default_rng(0)
+    t = rng.normal(size=rows + 200)
+    data = np.c_[t, np.tanh(t) + 0.2 * rng.normal(size=len(t)), rng.normal(size=len(t))]
+    fit, X = data[:rows], data[rows:]
     a = det.make("link_curved", seed=0).fit(fit).score(X)
     b = det.make("link_curved", seed=7).fit(fit).score(X)
     np.testing.assert_array_equal(a, b)

@@ -110,6 +110,12 @@ def average_precision(score: np.ndarray, y: np.ndarray) -> float:
     return float(average_precision_score(y, score))
 
 
+def vus_available() -> bool:
+    """True if the optional TSB-AD package is installed. Reports leave VUS-PR out when it is not."""
+    import importlib.util
+    return importlib.util.find_spec("TSB_AD") is not None
+
+
 def vus_pr(score: np.ndarray, y: np.ndarray, window: int = 10) -> float:
     """VUS-PR from TSB-AD (Liu & Paparrizos, NeurIPS 2024); nan if TSB-AD is not installed."""
     try:

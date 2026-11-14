@@ -35,6 +35,11 @@ METHODS = {
     "link_curved": {"window": 5},
 }
 FAR = 0.01
+# A gap between two methods smaller than this is not called a win. It is a fixed number, so it
+# does not move when detectors are added. It was chosen from the first pilot with six detectors,
+# where twice the typical chance wobble of a gap came to 0.116 (SKAB) and 0.122 (Tennessee
+# Eastman). Reports still print the measured wobble, for information only.
+MARGIN = 0.12
 
 
 def _cache_path(ds: str, method: str, seed: int) -> Path:
@@ -138,6 +143,7 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int)
     share = float(np.mean([y.mean() for y in labels]))
     mode = ds.calibration
     summary, by_group, primary = [], [], {}
+    with_vus = M.vus_available()     # the VUS-PR column is left out when TSB-AD is not installed
     for m in methods:
         seeds = [s for s in _seeds(m, n_seeds) if _cache_path(ds.name, m, s).exists()]
         if not seeds:
@@ -154,9 +160,10 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int)
                 "deploy_events_flagged": dep["events_flagged"],
                 "deploy_median_delay_s": dep["median_delay"] * ds.sample_seconds,
                 "ap_mean": np.mean([M.average_precision(s, y) for s, y in zip(runs, labels)]),
-                "vus_pr_mean": np.mean([M.vus_pr(s, y) for s, y in zip(runs, labels)]),
                 "seconds": secs,
             })
+            if with_vus:
+                per_seed[-1]["vus_pr_mean"] = np.mean([M.vus_pr(s, y) for s, y in zip(runs, labels)])
             if seed == seeds[0]:
                 primary[_label(m)] = runs
                 for g, v in M.dr_by_group(runs, labels, groups, p1["threshold"]).items():
@@ -175,8 +182,8 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int)
         lo, hi = np.nanquantile(draws[row["method"]], [0.05, 0.95])
         row["dr_ci90_low"], row["dr_ci90_high"] = float(lo), float(hi)
     sds = np.array([p["sd"] for p in pairs])
-    noise = {"median_pair_sd": float(np.median(sds)), "max_pair_sd": float(np.max(sds)),
-             "margin": float(max(0.05, 2 * np.median(sds)))}
+    # The wobble is measured and reported; the margin is the fixed MARGIN, not derived from it.
+    noise = {"median_pair_sd": float(np.median(sds)), "max_pair_sd": float(np.max(sds)), "margin": MARGIN}
     return {"summary": summary, "by_group": by_group, "pairs": pairs, "noise": noise,
             "runs": len(ds.runs), "anomaly_share": share, "calibration": mode}
 
@@ -200,20 +207,23 @@ def _markdown(results: dict) -> str:
         df = pd.DataFrame(res["summary"]).sort_values("dr_at_1pct", ascending=False)
         how = ("one threshold per run, averaged over runs" if res["calibration"] == "per_run"
                else "one threshold across all runs")
+        with_vus = "vus_pr_mean" in df
+        head = ["Method", "DR @1% FA", "90% interval", "DR @5% FA", "Deployable FA", "Deployable DR",
+                "Events flagged", "Median delay (s)"] + (["VUS-PR"] if with_vus else []) + ["AP"]
         lines += [f"## {name.upper()} ({res['runs']} runs, {res['anomaly_share']:.0%} of scored samples "
                   f"anomalous; {how})", "",
-                  "| Method | DR @1% FA | 90% interval | DR @5% FA | Deployable FA | Deployable DR | Events flagged | Median delay (s) | VUS-PR | AP |",
-                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+                  "| " + " | ".join(head) + " |", "| " + " | ".join(["---"] * len(head)) + " |"]
         for _, r in df.iterrows():
-            lines.append(
-                f"| {r['method']} | {r['dr_at_1pct']:.3f} | {r['dr_ci90_low']:.2f}-{r['dr_ci90_high']:.2f} | "
-                f"{r['dr_at_5pct']:.3f} | {r['deploy_far']:.3f} | {r['deploy_dr']:.3f} | "
-                f"{r['deploy_events_flagged']:.2f} | {r['deploy_median_delay_s']:.0f} | "
-                f"{r['vus_pr_mean']:.3f} | {r['ap_mean']:.3f} |")
+            cells = [r["method"], f"{r['dr_at_1pct']:.3f}", f"{r['dr_ci90_low']:.2f}-{r['dr_ci90_high']:.2f}",
+                     f"{r['dr_at_5pct']:.3f}", f"{r['deploy_far']:.3f}", f"{r['deploy_dr']:.3f}",
+                     f"{r['deploy_events_flagged']:.2f}", f"{r['deploy_median_delay_s']:.0f}"]
+            cells += ([f"{r['vus_pr_mean']:.3f}"] if with_vus else []) + [f"{r['ap_mean']:.3f}"]
+            lines.append("| " + " | ".join(cells) + " |")
         n = res["noise"]
         lines += ["", f"Random-score AP on this dataset is about {res['anomaly_share']:.2f}.",
-                  f"Paired-gap noise: median bootstrap s.d. {n['median_pair_sd']:.3f}, "
-                  f"largest {n['max_pair_sd']:.3f}. Margin = max(0.05, 2 x median) = **{n['margin']:.3f}**.", ""]
+                  f"A gap between two methods under **{n['margin']:.2f}** is not called a win (fixed margin). "
+                  f"For information, the measured chance wobble of a gap between two methods here: "
+                  f"typical {n['median_pair_sd']:.3f}, largest {n['max_pair_sd']:.3f} (bootstrap s.d.).", ""]
     return "\n".join(lines)
 
 
