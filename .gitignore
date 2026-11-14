@@ -1,0 +1,13 @@
+# Environment (uv-managed; recreate with `uv sync`)
+.venv/
+
+# Downloaded datasets and cached scores: never committed
+anomaly_lab/data/raw/
+anomaly_lab/results/cache/
+
+# Python and Jupyter leftovers
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/

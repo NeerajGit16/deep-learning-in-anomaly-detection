@@ -1,0 +1,127 @@
+method,group,dr_at_1pct
+Rolling z-score,01 step: A/C feed ratio,0.99375
+Rolling z-score,02 step: B composition,0.985
+Rolling z-score,03 step: D feed temperature,0.02625
+Rolling z-score,04 step: reactor cooling water temp,0.9975
+Rolling z-score,05 step: condenser cooling water temp,0.2825
+Rolling z-score,06 step: A feed loss,0.99875
+Rolling z-score,07 step: C header pressure loss,0.99875
+Rolling z-score,"08 random: A, B, C feed composition",0.98
+Rolling z-score,09 random: D feed temperature,0.03125
+Rolling z-score,10 random: C feed temperature,0.5625
+Rolling z-score,11 random: reactor cooling water temp,0.72625
+Rolling z-score,12 random: condenser cooling water temp,0.98375
+Rolling z-score,13 drift: reaction kinetics,0.945
+Rolling z-score,14 sticking: reactor cooling water valve,0.05375
+Rolling z-score,15 sticking: condenser cooling water valve,0.08375
+Rolling z-score,16 unknown,0.4825
+Rolling z-score,17 unknown,0.94375
+Rolling z-score,18 unknown,0.89375
+Rolling z-score,19 unknown,0.01125
+Rolling z-score,20 unknown,0.5675
+Rolling z-score,21 valve stuck: stream 4,0.40875
+EWMA chart,01 step: A/C feed ratio,0.9925
+EWMA chart,02 step: B composition,0.9825
+EWMA chart,03 step: D feed temperature,0.02875
+EWMA chart,04 step: reactor cooling water temp,0.9975
+EWMA chart,05 step: condenser cooling water temp,0.28125
+EWMA chart,06 step: A feed loss,0.9975
+EWMA chart,07 step: C header pressure loss,0.99875
+EWMA chart,"08 random: A, B, C feed composition",0.97625
+EWMA chart,09 random: D feed temperature,0.035
+EWMA chart,10 random: C feed temperature,0.5475
+EWMA chart,11 random: reactor cooling water temp,0.5775
+EWMA chart,12 random: condenser cooling water temp,0.97125
+EWMA chart,13 drift: reaction kinetics,0.94375
+EWMA chart,14 sticking: reactor cooling water valve,0.00125
+EWMA chart,15 sticking: condenser cooling water valve,0.095
+EWMA chart,16 unknown,0.47
+EWMA chart,17 unknown,0.97125
+EWMA chart,18 unknown,0.89375
+EWMA chart,19 unknown,0.00625
+EWMA chart,20 unknown,0.64625
+EWMA chart,21 valve stuck: stream 4,0.42375
+CUSUM chart,01 step: A/C feed ratio,0.98125
+CUSUM chart,02 step: B composition,0.9625
+CUSUM chart,03 step: D feed temperature,0.39875
+CUSUM chart,04 step: reactor cooling water temp,0.97375
+CUSUM chart,05 step: condenser cooling water temp,0.96875
+CUSUM chart,06 step: A feed loss,0.98375
+CUSUM chart,07 step: C header pressure loss,0.98875
+CUSUM chart,"08 random: A, B, C feed composition",0.9525
+CUSUM chart,09 random: D feed temperature,0.0
+CUSUM chart,10 random: C feed temperature,0.73
+CUSUM chart,11 random: reactor cooling water temp,0.74625
+CUSUM chart,12 random: condenser cooling water temp,0.92625
+CUSUM chart,13 drift: reaction kinetics,0.93
+CUSUM chart,14 sticking: reactor cooling water valve,0.0175
+CUSUM chart,15 sticking: condenser cooling water valve,0.1275
+CUSUM chart,16 unknown,0.73
+CUSUM chart,17 unknown,1.0
+CUSUM chart,18 unknown,0.87875
+CUSUM chart,19 unknown,0.0
+CUSUM chart,20 unknown,0.88375
+CUSUM chart,21 valve stuck: stream 4,0.7475
+PCA (T2 + SPE),01 step: A/C feed ratio,0.9975
+PCA (T2 + SPE),02 step: B composition,0.98625
+PCA (T2 + SPE),03 step: D feed temperature,0.02
+PCA (T2 + SPE),04 step: reactor cooling water temp,0.9925
+PCA (T2 + SPE),05 step: condenser cooling water temp,0.25125
+PCA (T2 + SPE),06 step: A feed loss,1.0
+PCA (T2 + SPE),07 step: C header pressure loss,1.0
+PCA (T2 + SPE),"08 random: A, B, C feed composition",0.97625
+PCA (T2 + SPE),09 random: D feed temperature,0.02
+PCA (T2 + SPE),10 random: C feed temperature,0.44625
+PCA (T2 + SPE),11 random: reactor cooling water temp,0.6025
+PCA (T2 + SPE),12 random: condenser cooling water temp,0.98875
+PCA (T2 + SPE),13 drift: reaction kinetics,0.94875
+PCA (T2 + SPE),14 sticking: reactor cooling water valve,0.99875
+PCA (T2 + SPE),15 sticking: condenser cooling water valve,0.0225
+PCA (T2 + SPE),16 unknown,0.39375
+PCA (T2 + SPE),17 unknown,0.94375
+PCA (T2 + SPE),18 unknown,0.9025
+PCA (T2 + SPE),19 unknown,0.10375
+PCA (T2 + SPE),20 unknown,0.52875
+PCA (T2 + SPE),21 valve stuck: stream 4,0.4875
+Isolation Forest,01 step: A/C feed ratio,0.82125
+Isolation Forest,02 step: B composition,0.96375
+Isolation Forest,03 step: D feed temperature,0.02125
+Isolation Forest,04 step: reactor cooling water temp,0.01125
+Isolation Forest,05 step: condenser cooling water temp,0.2475
+Isolation Forest,06 step: A feed loss,0.98625
+Isolation Forest,07 step: C header pressure loss,0.42625
+Isolation Forest,"08 random: A, B, C feed composition",0.9625
+Isolation Forest,09 random: D feed temperature,0.02375
+Isolation Forest,10 random: C feed temperature,0.33375
+Isolation Forest,11 random: reactor cooling water temp,0.0975
+Isolation Forest,12 random: condenser cooling water temp,0.9625
+Isolation Forest,13 drift: reaction kinetics,0.91875
+Isolation Forest,14 sticking: reactor cooling water valve,0.03
+Isolation Forest,15 sticking: condenser cooling water valve,0.05625
+Isolation Forest,16 unknown,0.165
+Isolation Forest,17 unknown,0.1625
+Isolation Forest,18 unknown,0.87375
+Isolation Forest,19 unknown,0.0
+Isolation Forest,20 unknown,0.225
+Isolation Forest,21 valve stuck: stream 4,0.19375
+Matrix Profile,01 step: A/C feed ratio,0.99375
+Matrix Profile,02 step: B composition,0.985
+Matrix Profile,03 step: D feed temperature,0.0375
+Matrix Profile,04 step: reactor cooling water temp,1.0
+Matrix Profile,05 step: condenser cooling water temp,0.68
+Matrix Profile,06 step: A feed loss,1.0
+Matrix Profile,07 step: C header pressure loss,1.0
+Matrix Profile,"08 random: A, B, C feed composition",0.98375
+Matrix Profile,09 random: D feed temperature,0.015
+Matrix Profile,10 random: C feed temperature,0.63625
+Matrix Profile,11 random: reactor cooling water temp,0.99
+Matrix Profile,12 random: condenser cooling water temp,0.9975
+Matrix Profile,13 drift: reaction kinetics,0.94875
+Matrix Profile,14 sticking: reactor cooling water valve,0.99875
+Matrix Profile,15 sticking: condenser cooling water valve,0.1375
+Matrix Profile,16 unknown,0.60875
+Matrix Profile,17 unknown,0.97125
+Matrix Profile,18 unknown,0.89625
+Matrix Profile,19 unknown,0.9125
+Matrix Profile,20 unknown,0.73
+Matrix Profile,21 valve stuck: stream 4,0.5375

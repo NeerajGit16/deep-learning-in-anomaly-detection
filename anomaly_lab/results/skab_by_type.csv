@@ -1,0 +1,43 @@
+method,group,dr_at_1pct
+Rolling z-score,fluid leak or addition,0.4844588380902628
+Rolling z-score,water level change,0.3728668941979522
+Rolling z-score,cavitation,0.3802588996763754
+Rolling z-score,hot water inflow,0.7582781456953642
+Rolling z-score,rotor imbalance,0.7978508096035037
+Rolling z-score,inlet valve closed,0.4359016872560873
+Rolling z-score,outlet valve closed,0.42826618303711406
+EWMA chart,fluid leak or addition,0.48153865205369695
+EWMA chart,water level change,0.3796928327645051
+EWMA chart,cavitation,0.38349514563106796
+EWMA chart,hot water inflow,0.7483443708609272
+EWMA chart,rotor imbalance,0.7928791770737406
+EWMA chart,inlet valve closed,0.43680774510752907
+EWMA chart,outlet valve closed,0.4256102726127785
+CUSUM chart,fluid leak or addition,0.5
+CUSUM chart,water level change,0.0
+CUSUM chart,cavitation,0.0
+CUSUM chart,hot water inflow,0.0
+CUSUM chart,rotor imbalance,0.0
+CUSUM chart,inlet valve closed,0.035412726900004556
+CUSUM chart,outlet valve closed,0.061439920933591824
+PCA (T2 + SPE),fluid leak or addition,0.4127494403110692
+PCA (T2 + SPE),water level change,0.34666611171231165
+PCA (T2 + SPE),cavitation,0.4282347194235818
+PCA (T2 + SPE),hot water inflow,0.7251655629139073
+PCA (T2 + SPE),rotor imbalance,0.7984199399641787
+PCA (T2 + SPE),inlet valve closed,0.3443279551638866
+PCA (T2 + SPE),outlet valve closed,0.1414545529272767
+Isolation Forest,fluid leak or addition,0.2403951263507929
+Isolation Forest,water level change,0.2515929712508419
+Isolation Forest,cavitation,0.15101666971972888
+Isolation Forest,hot water inflow,0.27483443708609273
+Isolation Forest,rotor imbalance,0.4224641679306889
+Isolation Forest,inlet valve closed,0.2333378838073916
+Isolation Forest,outlet valve closed,0.21141971342286192
+Matrix Profile,fluid leak or addition,0.6486689778003943
+Matrix Profile,water level change,0.38822525597269625
+Matrix Profile,cavitation,0.41961287171032546
+Matrix Profile,hot water inflow,0.7350993377483444
+Matrix Profile,rotor imbalance,0.7660820229028928
+Matrix Profile,inlet valve closed,0.5341303909638003
+Matrix Profile,outlet valve closed,0.4488013892579208
