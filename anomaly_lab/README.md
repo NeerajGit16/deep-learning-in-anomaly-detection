@@ -12,7 +12,7 @@ Open `main.ipynb` in Jupyter or VS Code and run it top to bottom. It walks throu
 2. SKAB (a real water pump): tables and pictures.
 3. Tennessee Eastman (a simulated chemical plant): tables and pictures.
 4. How a detector is judged: the "1 false alarm in 100" rule.
-5. Six simple detectors on both datasets: the bar deep learning has to beat.
+5. Eight simple detectors on both datasets: the bar deep learning has to beat.
 6. Playground: change settings, look at other faults, write your own detector.
 7. What's next, and why we will also generate data.
 

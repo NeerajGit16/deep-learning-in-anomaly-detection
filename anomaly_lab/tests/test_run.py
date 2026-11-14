@@ -70,3 +70,20 @@ def test_changing_a_setting_gives_a_new_cache_file(monkeypatch):
     before = run._cache_path("toy", "link_straight", 0)
     monkeypatch.setitem(run.METHODS, "link_straight", {"window": 9})
     assert run._cache_path("toy", "link_straight", 0) != before
+
+
+def test_gap_table_flips_signs_and_applies_the_fixed_margin():
+    res = {"pairs": [
+        {"method_a": "A", "method_b": "B", "gap": 0.20, "sd": 0.03, "ci90_low": 0.15, "ci90_high": 0.25},
+        {"method_a": "A", "method_b": "C", "gap": 0.05, "sd": 0.01, "ci90_low": 0.03, "ci90_high": 0.07},
+        {"method_a": "D", "method_b": "A", "gap": 0.30, "sd": 0.20, "ci90_low": -0.02, "ci90_high": 0.60},
+        {"method_a": "B", "method_b": "C", "gap": -0.15, "sd": 0.01, "ci90_low": -0.17, "ci90_high": -0.13},
+    ]}
+    t = run.gap_table(res, "A")
+    assert list(t.index) == ["B", "C", "D"]
+    assert t.loc["B", "verdict"] == "ahead"                     # 20 points, range clear of zero
+    assert t.loc["C", "verdict"] == "tie"                       # real but under the 12-point margin
+    assert t.loc["D", "verdict"] == "tie"                       # big gap, but the range includes zero
+    assert t.loc["D", "gap"] == -0.30 and (t.loc["D", "low"], t.loc["D", "high"]) == (-0.60, 0.02)
+    b = run.gap_table(res, "B", ["A"])
+    assert b.loc["A", "verdict"] == "behind" and b.loc["A", "gap"] == -0.20 and len(b) == 1

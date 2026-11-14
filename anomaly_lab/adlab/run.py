@@ -188,6 +188,31 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int)
             "runs": len(ds.runs), "anomaly_share": share, "calibration": mode}
 
 
+def gap_table(res: dict, method: str, others: list[str] | None = None) -> pd.DataFrame:
+    """Gaps in catch rate between `method` and other methods, from a report_dataset() result.
+
+    Names are the detectors' display names, e.g. "Straight-link residual". A positive gap means
+    `method` catches more. The range is the 90% interval of the gap when runs are resampled,
+    using the same resampled runs for both methods. `method` is called 'ahead' or 'behind' only
+    if the gap is at least MARGIN and its range does not include zero; otherwise it is a 'tie'.
+    """
+    rows = {}
+    for p in res["pairs"]:
+        if method not in (p["method_a"], p["method_b"]):
+            continue
+        flip = p["method_b"] == method
+        other = p["method_a"] if flip else p["method_b"]
+        gap, lo, hi = ((-p["gap"], -p["ci90_high"], -p["ci90_low"]) if flip
+                       else (p["gap"], p["ci90_low"], p["ci90_high"]))
+        clear = abs(gap) >= MARGIN and (lo > 0 or hi < 0)
+        rows[other] = {"gap": gap, "low": lo, "high": hi,
+                       "verdict": ("ahead" if gap > 0 else "behind") if clear else "tie"}
+    out = pd.DataFrame(rows).T.loc[others if others is not None else list(rows)]
+    out[["gap", "low", "high"]] = out[["gap", "low", "high"]].astype(float)
+    out.index.name = f"{method} against"
+    return out
+
+
 def _figures(results: dict, out: Path):
     import matplotlib.pyplot as plt
 
