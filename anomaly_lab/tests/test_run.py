@@ -127,6 +127,12 @@ def test_excess_alarms_over_the_twin(tmp_path, monkeypatch):
     new = run.report_dataset(ds, ["cusum"], 1, 50)
     nothing = lambda res: next(r["dr_at_1pct"] for r in res["by_group"] if r["group"] == "does nothing")   # noqa: E731
     assert old["calibration"] == "pooled" and new["calibration"] == "matched"
+    # the report under the new rule carries the old-rule number alongside, and the written report shows it
+    assert np.isclose(new["summary"][0]["dr_old_rule"], old["summary"][0]["dr_at_1pct"])
+    assert "dr_old_rule" not in old["summary"][0]
+    assert "Old rule (first 8 hours)" in run._markdown({"toy": new})
+    assert new["calibration_runs"] == 30 and "set on 30 separate fault-free run(s)" in run._markdown({"toy": new})
+    assert "Old rule" not in run._markdown({"toy": old})
     assert nothing(old) > 0.1 and nothing(new) < 0.05
     assert old["summary"][0]["far_late_fault_free"] > 0.1                   # what the old line lets through later
     assert abs(new["summary"][0]["far_late_fault_free"] - 0.01) < 0.002     # the matched line: 1 in 100 by construction
@@ -176,3 +182,10 @@ def test_gap_table_flips_signs_and_applies_the_fixed_margin():
     assert t.loc["D", "gap"] == -0.30 and (t.loc["D", "low"], t.loc["D", "high"]) == (-0.60, 0.02)
     b = run.gap_table(res, "B", ["A"])
     assert b.loc["A", "verdict"] == "behind" and b.loc["A", "gap"] == -0.20 and len(b) == 1
+    res["pairs"] += [{"method_a": "B", "method_b": "D", "gap": 0.0, "sd": 0.1, "ci90_low": -0.1, "ci90_high": 0.1},
+                     {"method_a": "C", "method_b": "D", "gap": 0.0, "sd": 0.1, "ci90_low": -0.1, "ci90_high": 0.1}]
+    res["summary"] = [{"method": m, "dr_at_1pct": v} for m, v in (("B", 0.5), ("A", 0.7), ("D", 0.9), ("C", 0.65))]
+    v = run.verdict_table(res)
+    assert list(v.index) == list(v.columns) == ["D", "A", "C", "B"]             # best first
+    assert v.loc["A", "B"] == "ahead" and v.loc["B", "A"] == "behind" and v.loc["A", "C"] == "tie"
+    assert v.loc["B", "C"] == "behind" and v.loc["C", "B"] == "ahead" and v.loc["A", "A"] == ""

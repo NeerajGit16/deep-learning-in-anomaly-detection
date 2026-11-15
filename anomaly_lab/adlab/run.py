@@ -207,6 +207,9 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int,
             if cal and mode != "per_run":
                 # false alarms this line gives on fault-free runs, over the fault's stretch of a run
                 per_seed[-1]["far_late_fault_free"] = float(np.mean(np.concatenate(cal) > p1["threshold"]))
+            if mode == "matched":
+                # for comparison: the catch rate under the older rule (line set on the runs' own first part)
+                per_seed[-1]["dr_old_rule"] = M.dr_at_far(runs, labels, FAR, "pooled")["dr"]
             if seed == seeds[0]:
                 primary[_label(m)], calibs[_label(m)] = runs, cal
                 for g, v in M.dr_by_group(runs, labels, groups, p1["threshold"]).items():
@@ -229,7 +232,8 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int,
     # The wobble is measured and reported; the margin is the fixed MARGIN, not derived from it.
     noise = {"median_pair_sd": float(np.median(sds)), "max_pair_sd": float(np.max(sds)), "margin": MARGIN}
     return {"summary": summary, "by_group": by_group, "pairs": pairs, "noise": noise,
-            "runs": len(kept), "anomaly_share": share, "calibration": mode}
+            "runs": len(kept), "anomaly_share": share, "calibration": mode,
+            "calibration_runs": len(ds.calibration_runs()) if mode == "matched" else None}
 
 
 def rates(res: dict, digits: int = 2) -> pd.Series:
@@ -415,6 +419,22 @@ def gap_table(res: dict, method: str, others: list[str] | None = None) -> pd.Dat
     return out
 
 
+def verdict_table(res: dict) -> pd.DataFrame:
+    """Every pair of detectors at once: is the row detector 'ahead' of, 'behind' or in a 'tie' with the column one?
+
+    The same rule as gap_table: ahead or behind needs a gap of at least MARGIN whose range does
+    not include zero. Detectors are listed best first.
+    """
+    order = pd.DataFrame(res["summary"]).sort_values("dr_at_1pct", ascending=False)["method"].tolist()
+    out = pd.DataFrame("", index=order, columns=order)
+    for m in order:
+        gaps = gap_table(res, m)
+        for other in gaps.index:
+            out.loc[m, other] = gaps.loc[other, "verdict"]
+    out.index.name = "row against column"
+    return out
+
+
 def _figures(results: dict, out: Path):
     import matplotlib.pyplot as plt
 
@@ -434,18 +454,21 @@ def _markdown(results: dict) -> str:
         df = pd.DataFrame(res["summary"]).sort_values("dr_at_1pct", ascending=False)
         how = {"per_run": "one threshold per run, averaged over runs",
                "pooled": "one threshold across all runs",
-               "matched": "one threshold, set on separate fault-free runs over the same hours of a run as the fault",
+               "matched": f"one threshold, set on {res.get('calibration_runs')} separate fault-free run(s) over the "
+                          "same hours of a run as the fault",
                }[res["calibration"]]
-        with_vus = "vus_pr_mean" in df
-        head = ["Method", "DR @1% FA", "90% interval", "DR @5% FA", "Deployable FA", "Deployable DR",
-                "Events flagged", "Median delay (s)"] + (["VUS-PR"] if with_vus else []) + ["AP"]
+        with_vus, with_old = "vus_pr_mean" in df, "dr_old_rule" in df
+        head = (["Method", "DR @1% FA", "90% interval"] + (["Old rule (first 8 hours)"] if with_old else [])
+                + ["DR @5% FA", "Deployable FA", "Deployable DR", "Events flagged", "Median delay (s)"]
+                + (["VUS-PR"] if with_vus else []) + ["AP"])
         lines += [f"## {name.upper()} ({res['runs']} runs, {res['anomaly_share']:.0%} of scored samples "
                   f"anomalous; {how})", "",
                   "| " + " | ".join(head) + " |", "| " + " | ".join(["---"] * len(head)) + " |"]
         for _, r in df.iterrows():
-            cells = [r["method"], f"{r['dr_at_1pct']:.3f}", f"{r['dr_ci90_low']:.2f}-{r['dr_ci90_high']:.2f}",
-                     f"{r['dr_at_5pct']:.3f}", f"{r['deploy_far']:.3f}", f"{r['deploy_dr']:.3f}",
-                     f"{r['deploy_events_flagged']:.2f}", f"{r['deploy_median_delay_s']:.0f}"]
+            cells = [r["method"], f"{r['dr_at_1pct']:.3f}", f"{r['dr_ci90_low']:.2f}-{r['dr_ci90_high']:.2f}"]
+            cells += [f"{r['dr_old_rule']:.3f}"] if with_old else []
+            cells += [f"{r['dr_at_5pct']:.3f}", f"{r['deploy_far']:.3f}", f"{r['deploy_dr']:.3f}",
+                      f"{r['deploy_events_flagged']:.2f}", f"{r['deploy_median_delay_s']:.0f}"]
             cells += ([f"{r['vus_pr_mean']:.3f}"] if with_vus else []) + [f"{r['ap_mean']:.3f}"]
             lines.append("| " + " | ".join(cells) + " |")
         n = res["noise"]
