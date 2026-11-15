@@ -6,9 +6,11 @@ dependencies = [
     "matplotlib>=3.11.2",
     "numpy>=2.5.4",
     "pandas>=3.1.1",
+    "pyreadr>=0.5.9",
     "scikit-learn>=1.9.1",
     "scipy>=1.18.1",
     "stumpy>=1.14.1",
+    "threadpoolctl>=3.7.0",
 ]
 
 [dependency-groups]

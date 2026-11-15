@@ -6,10 +6,12 @@ Every run carries
     fit    (n, d)  normal data the detector is fitted on for this run
     group          anomaly type or fault, used for per-type reporting
 
-Datasets come from public GitHub archives and are cached under data/raw/.
+Datasets come from public archives (GitHub, Harvard Dataverse) and are cached under data/raw/.
 """
 from __future__ import annotations
 
+import functools
+import hashlib
 import io
 import urllib.request
 import zipfile
@@ -47,10 +49,22 @@ class Dataset:
     # Separate normal series for deployable thresholds, scored with the same fit as the runs.
     # None means thresholds are calibrated leave-one-run-out on the other runs' normal samples.
     val_normal: list[Run] | None = None
-    # How the primary metric sets its threshold: "pooled" (one threshold across runs, right when
-    # all runs share one fit) or "per_run" (each run's own threshold, right when each run has
-    # its own fit and recording session).
+    # How the primary metric sets its threshold (alarm line):
+    #   "pooled"   one line across runs, from the normal samples of the scored runs themselves.
+    #   "per_run"  each run's own line, right when each run has its own fit and recording session.
+    #   "matched"  one line, from separate fault-free runs over the same stretch of a run as the
+    #              fault covers (samples from `matched_start` on). Right when the normal part of
+    #              a scored run comes before the fault and looks calmer than the hours after it,
+    #              as in Tennessee Eastman, where every run starts from the same state.
     calibration: str = "pooled"
+    matched_start: int | None = None
+    # The dataset whose runs are those fault-free runs (scored and cached under its own name).
+    # None means the fault-free runs are val_normal.
+    matched_from: Dataset | None = None
+
+    def calibration_runs(self) -> list[Run]:
+        """The fault-free runs that set the alarm line under "matched" calibration."""
+        return self.matched_from.runs if self.matched_from is not None else (self.val_normal or [])
 
 
 def download(name: str, raw: Path = RAW) -> Path:
@@ -145,7 +159,9 @@ def load_tep(raw: Path = RAW) -> Dataset:
 
     Detectors are fitted on the normal training run d00.dat (500 samples). Each of the 21
     fault test runs has 960 samples, normal for the first 160. The normal test run
-    d00_te.dat is held out for deployable thresholds.
+    d00_te.dat is held out: its samples 161-960 set the alarm lines (matched-window
+    calibration; see Dataset). It is the only such run in these files, so the lines rest on
+    one run of 800 samples.
     """
     base = raw / "tep"
     if not (base / "d00.dat").exists():
@@ -162,7 +178,199 @@ def load_tep(raw: Path = RAW) -> Dataset:
                         meta={"fault": f, "onset": TEP_ONSET}))
     normal = np.loadtxt(base / "d00_te.dat")
     val = [Run("normal_te", normal, np.zeros(len(normal), int), fit, group="normal")]
-    return Dataset("tep", runs, TEP_CHANNELS, 180.0, val)
+    return Dataset("tep", runs, TEP_CHANNELS, 180.0, val, calibration="matched", matched_start=TEP_ONSET)
+
+
+# ---------------------------------------------------------------- Tennessee Eastman (Rieth set)
+#
+# Rieth, Amsel, Tran, Cook (2017), "Additional Tennessee Eastman Process Simulation Data for
+# Anomaly Detection Evaluation", Harvard Dataverse, doi:10.7910/DVN/6C3JR1 (public domain).
+# The same plant model as the Braatz files, run 500 times per case with different random
+# numbers. None of its runs repeats a Braatz file (checked in tests/test_data.py), so they are
+# fresh runs for any detector whose settings were chosen on the Braatz test runs.
+#
+# Twins. Testing run number r uses the same random numbers in every file. So faulty run r of
+# any fault is identical to fault-free testing run r until the fault starts, and the fault-free
+# run shows what that same run would have done with no fault. Three consequences:
+#   - the fault start can be read off the data exactly (rieth_onset_check);
+#   - the first 8 hours of run r are the same readings for all 20 faults, so there are only as
+#     many different stretches of normal data as there are run numbers;
+#   - held-out normal runs must use run numbers that no scored run uses.
+
+RIETH_FILES = {   # kind: (Dataverse file id, file name, md5)
+    "fault_free_training": (3031241, "TEP_FaultFree_Training.RData", "ec126484534331f85001d8c4ebce6d17"),
+    "fault_free_testing": (3031240, "TEP_FaultFree_Testing.RData", "38ad9810fc871026157086ae2c2f0ee9"),
+    "faulty_testing": (3031243, "TEP_Faulty_Testing.RData", "556bdb64c83021bc0c5f92e427753565"),
+}
+RIETH_FAULTS = range(1, 21)   # this set has faults 1-20; fault 21 of the Braatz files is not in it
+# In the 960-sample testing runs the fault starts at sample 161 (index 160), as in the Braatz
+# test runs. Read off the data by rieth_onset_check() and checked in tests/test_data.py.
+RIETH_ONSET = 160
+
+
+def download_rieth(raw: Path = RAW, kinds=tuple(RIETH_FILES)) -> Path:
+    """Fetch the Rieth .RData files (about 910 MB in all) into data/raw/tep_rieth. Skips files already there."""
+    target = raw / "tep_rieth"
+    target.mkdir(parents=True, exist_ok=True)
+    for kind in kinds:
+        file_id, name, md5 = RIETH_FILES[kind]
+        out = target / name
+        if out.exists():
+            continue
+        # The server turns away Python's default client name, so the request names this code.
+        request = urllib.request.Request(f"https://dataverse.harvard.edu/api/access/datafile/{file_id}",
+                                         headers={"User-Agent": "adlab-data-loader/0.1"})
+        part, digest = out.with_suffix(".part"), hashlib.md5()
+        with urllib.request.urlopen(request, timeout=180) as response, open(part, "wb") as f:
+            while chunk := response.read(1 << 20):
+                f.write(chunk)
+                digest.update(chunk)
+        if digest.hexdigest() != md5:
+            part.unlink()
+            raise OSError(f"{name}: the download does not match the published checksum; try again")
+        part.replace(out)
+    return target
+
+
+def _frame_to_runs(df: pd.DataFrame, n_runs: int) -> np.ndarray:
+    """Rieth table -> array (faults, n_runs, samples, 52), keeping simulation runs 1..n_runs of each fault.
+
+    The table has one row per sample: faultNumber, simulationRun, sample, then the 52 variables.
+    """
+    expected = ["faultNumber", "simulationRun", "sample"] + [f"xmeas_{i}" for i in range(1, 42)]         + [f"xmv_{i}" for i in range(1, 12)]
+    if list(df.columns) != expected:
+        raise ValueError("unexpected columns in the Rieth table")
+    df = df[df["simulationRun"] <= n_runs]
+    faults, runs, samples = (df[c].to_numpy() for c in ("faultNumber", "simulationRun", "sample"))
+    n_faults, length = len(np.unique(faults)), int(samples.max())
+    if len(df) != n_faults * n_runs * length:
+        raise ValueError(f"expected {n_runs} runs of {length} samples for each of {n_faults} faults")
+    order = np.lexsort((samples, runs, faults))          # by fault, then run, then sample
+    out = df.iloc[:, 3:].to_numpy(float)[order].reshape(n_faults, n_runs, length, 52)
+    if not (samples[order].reshape(n_faults, n_runs, length) == np.arange(1, length + 1)).all():
+        raise ValueError("samples are not numbered 1..n within every run")
+    return out
+
+
+def rieth_runs(kind: str, n_runs: int, raw: Path = RAW) -> np.ndarray:
+    """Simulation runs 1..n_runs of one Rieth file, as an array (faults, n_runs, samples, 52).
+
+    The fault-free files have one "fault" (normal running). Reading the big faulty file needs
+    about 10 GB of memory and a minute, so the chosen runs are saved as a .npy file next to it
+    and read from there afterwards.
+    """
+    base = download_rieth(raw, (kind,))
+    saved = base / f"{kind}_first{n_runs}.npy"
+    if saved.exists():
+        return np.load(saved)
+    for other in base.glob(f"{kind}_first*.npy"):          # a saved file with more runs will do
+        if int(other.stem.rsplit("first", 1)[1]) > n_runs:
+            return np.load(other, mmap_mode="r")[:, :n_runs].copy()
+    import pyreadr
+    out = _frame_to_runs(pyreadr.read_r(str(base / RIETH_FILES[kind][1]))[kind], n_runs)
+    np.save(saved, out)
+    return out
+
+
+def first_difference(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """For arrays (runs, samples, sensors): per run, the first sample index where a and b differ (-1 if never)."""
+    differs = (a != b).any(-1)
+    return np.where(differs.any(-1), differs.argmax(-1), -1)
+
+
+def rieth_onset_check(raw: Path = RAW, n_runs: int = 50) -> pd.DataFrame:
+    """Where does each fault start? Read off the data by comparing every faulty run with its twin.
+
+    One row per fault: the earliest and latest first-difference index over the runs, and how
+    many runs already differ at index RIETH_ONSET. Faults that switch on as a step differ from
+    the twin at once; faults that are a slowly growing random disturbance can take a few
+    samples before any reading changes.
+    """
+    faulty = rieth_runs("faulty_testing", n_runs, raw)
+    twins = rieth_runs("fault_free_testing", n_runs, raw)[0]
+    rows = []
+    for i, f in enumerate(RIETH_FAULTS):
+        first = first_difference(faulty[i], twins)
+        rows.append({"fault": f"{f:02d} {TEP_FAULTS[f]}", "earliest first difference": int(first.min()),
+                     "latest first difference": int(first.max()),
+                     f"runs that differ at index {RIETH_ONSET}": int((first == RIETH_ONSET).sum()), "runs": n_runs})
+    return pd.DataFrame(rows).set_index("fault")
+
+
+def _rieth_name(base: str, chosen: tuple, default: tuple) -> str:
+    """The name goes into cache file names, so a different choice of runs gets its own cached scores."""
+    return base if chosen == default else base + "_" + "_".join(str(c) for c in chosen)
+
+
+@functools.lru_cache(maxsize=None)
+def _rieth_fit(raw: Path, fit_runs: int) -> np.ndarray:
+    """Fit data shared by every Rieth dataset with the same fit_runs (one array, so one fitted model)."""
+    return rieth_runs("fault_free_training", fit_runs, raw)[0].reshape(-1, 52)
+
+
+def _fault_free_set(base: str, group: str, raw: Path, first_run: int, runs: int, fit_runs: int,
+                    default: tuple, matched_from: Dataset | None) -> Dataset:
+    """Fault-free testing runs first_run..first_run+runs-1, labelled over the hours a fault would cover."""
+    fit = _rieth_fit(raw, fit_runs)
+    x = rieth_runs("fault_free_testing", first_run + runs - 1, raw)[0][first_run - 1:]
+    y = (np.arange(x.shape[1]) >= RIETH_ONSET).astype(int)
+    out = [Run(f"nofault/run{first_run + r:03d}", x[r], y.copy(), fit, group=group,
+               meta={"fault": 0, "run": first_run + r, "onset": RIETH_ONSET}) for r in range(runs)]
+    return Dataset(_rieth_name(base, (first_run, runs, fit_runs), default), out, TEP_CHANNELS, 180.0, None,
+                   calibration="matched" if matched_from is not None else "pooled",
+                   matched_start=RIETH_ONSET, matched_from=matched_from)
+
+
+def load_tep_rieth_calibration(raw: Path = RAW, first_run: int = 51, runs: int = 50, fit_runs: int = 20) -> Dataset:
+    """Fault-free runs that set the alarm lines for the Rieth runs (matched-window calibration).
+
+    Fault-free testing runs 51-100 by default. They are neither the fit runs nor the twins of
+    the scored runs (run numbers 1-50), so they share no random numbers with either.
+    """
+    return _fault_free_set("tep_rieth_calibration", "00 no fault (calibration)", raw, first_run, runs, fit_runs,
+                           (51, 50, 20), None)
+
+
+def load_tep_rieth(raw: Path = RAW, runs_per_fault: int = 50, fit_runs: int = 20, val_runs: int = 20,
+                   calibration_runs: int = 50) -> Dataset:
+    """Tennessee Eastman, Rieth files: fresh runs of the same plant, many per fault.
+
+    Scored runs       testing runs 1..runs_per_fault of each of faults 1-20: 960 samples each
+                      (48 hours), normal for the first 160. meta["run"] is the run number.
+    Fit data          fault-free training runs 1..fit_runs joined end to end (500 samples each).
+    Alarm lines       set on the next calibration_runs fault-free testing runs after those run
+                      numbers, over samples 161-960 (matched-window calibration; see Dataset).
+    Held-out normal   the first val_runs of those same fault-free runs, whole, kept for the
+                      older "deployable threshold" numbers.
+    None of the fault-free runs shares random numbers with the scored runs or the fit data.
+    Which runs are used is fixed by their numbers, not chosen by looking at results.
+    """
+    fit = _rieth_fit(raw, fit_runs)
+    normal = rieth_runs("fault_free_testing", runs_per_fault + val_runs, raw)[0][runs_per_fault:]
+    faulty = rieth_runs("faulty_testing", runs_per_fault, raw)
+    y = (np.arange(faulty.shape[2]) >= RIETH_ONSET).astype(int)
+    runs = [Run(f"fault{f:02d}/run{r + 1:03d}", faulty[i, r], y.copy(), fit, group=f"{f:02d} {TEP_FAULTS[f]}",
+                meta={"fault": f, "run": r + 1, "onset": RIETH_ONSET})
+            for i, f in enumerate(RIETH_FAULTS) for r in range(runs_per_fault)]
+    val = [Run(f"normal/run{runs_per_fault + r + 1:03d}", x, np.zeros(len(x), int), fit, group="normal")
+           for r, x in enumerate(normal)]
+    name = _rieth_name("tep_rieth", (runs_per_fault, fit_runs, val_runs), (50, 20, 20))
+    return Dataset(name, runs, TEP_CHANNELS, 180.0, val, calibration="matched", matched_start=RIETH_ONSET,
+                   matched_from=load_tep_rieth_calibration(raw, runs_per_fault + 1, calibration_runs, fit_runs))
+
+
+def load_tep_rieth_control(raw: Path = RAW, runs: int = 50, fit_runs: int = 20, calibration_runs: int = 50) -> Dataset:
+    """The twins of the scored Rieth runs: the same runs with no fault at all.
+
+    Fault-free testing runs 1..runs, fitted like load_tep_rieth and judged against the same
+    alarm lines. The label marks the hours where the fault would have been (from index 160),
+    although nothing is wrong there. Whatever a detector flags in those hours is not detection.
+    """
+    out = _fault_free_set("tep_rieth_control", "00 no fault (twin)", raw, 1, runs, fit_runs, (1, 50, 20),
+                          load_tep_rieth_calibration(raw, runs + 1, calibration_runs, fit_runs))
+    # keep the cache names of the first scoring: they did not include the first run number
+    out.name = _rieth_name("tep_rieth_control", (runs, fit_runs), (50, 20))
+    return out
 
 
 # ---------------------------------------------------------------- plain-English descriptions
@@ -236,7 +444,8 @@ def tep_frame(fault: int = 1, raw: Path = RAW) -> pd.DataFrame:
     return df
 
 
-LOADERS = {"skab": load_skab, "tep": load_tep}
+LOADERS = {"skab": load_skab, "tep": load_tep, "tep_rieth": load_tep_rieth,
+           "tep_rieth_control": load_tep_rieth_control, "tep_rieth_calibration": load_tep_rieth_calibration}
 
 
 def load(name: str, raw: Path = RAW) -> Dataset:

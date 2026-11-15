@@ -46,3 +46,34 @@ def correlations(X: np.ndarray, channels: list[str]) -> pd.DataFrame:
     c = np.full((X.shape[1], X.shape[1]), np.nan)
     c[np.ix_(keep, keep)] = np.corrcoef(X[:, keep], rowvar=False)
     return pd.DataFrame(c, index=channels, columns=channels)
+
+
+
+def movement_by_stretch(runs: list, edges: tuple = (0, 160, 320, 640, 960), sample_hours: float = 0.05) -> pd.DataFrame:
+    """How much fault-free runs move in each stretch of a run, next to the data the detectors learned from.
+
+    `runs` are fault-free Runs of equal length that share one fit. Readings are put in units of
+    each sensor's normal wiggle on the fit data, so the fit data itself has movement 1.
+
+    movement               average squared distance from the normal level, over runs and sensors
+                           (1 = as in the fit data; lower = calmer)
+    sensors under 0.8      sensors whose own movement in the stretch is under 0.8
+    sensors identical at   sensors that read exactly the same in every run at the first reading
+    the start              of the stretch
+    """
+    mu, sd = runs[0].fit.mean(0), runs[0].fit.std(0)
+    z = (np.stack([r.X for r in runs]) - mu) / np.where(sd > 1e-9, sd, 1.0)        # (runs, samples, sensors)
+    rows = {}
+    for a, b in zip(edges[:-1], edges[1:]):
+        per_sensor = (z[:, a:b] ** 2).mean((0, 1))
+        rows[f"hours {a * sample_hours:g}-{b * sample_hours:g}"] = {
+            "movement": float(per_sensor.mean()), "sensors under 0.8": int((per_sensor < 0.8).sum()),
+            "sensors identical at the start": int((np.ptp(z[:, a], axis=0) == 0).sum())}
+    out = pd.DataFrame(rows).T.astype({"sensors under 0.8": int, "sensors identical at the start": int})
+    out.index.name = "stretch of a run"
+    return out
+
+
+def tidy(value: float) -> str:
+    """A number for a table: three decimals at most, no trailing zeros, and never "-0"."""
+    return f"{round(float(value), 3) + 0.0:.3f}".rstrip("0").rstrip(".")

@@ -94,13 +94,28 @@ def _seeds(method: str, n_seeds: int) -> list[int]:
 def score_all(datasets=("skab", "tep"), methods=None, n_seeds: int = 5, verbose: bool = True):
     """Score every run of every dataset with every method (cached, so reruns are instant)."""
     methods = [m for m in (methods or METHODS) if m in det.available()]
-    for name in datasets:
-        ds = D.load(name)
+    for ds in datasets:
+        ds = D.load(ds) if isinstance(ds, str) else ds     # a name, or a Dataset already loaded
         for m in methods:
             for seed in _seeds(m, n_seeds):
                 p = score_dataset(ds, m, seed)
                 if verbose:
-                    print(f"{name:5s} {m:15s} seed {seed}: {p.name}", flush=True)
+                    print(f"{ds.name:5s} {m:15s} seed {seed}: {p.name}", flush=True)
+
+
+def calibration_scores(ds: D.Dataset, method: str, seed: int = 0) -> list | None:
+    """Cached scores of a dataset's fault-free calibration runs, cut to the stretch of a run the fault covers.
+
+    These set the alarm line under matched-window calibration (see data.Dataset). None if the
+    dataset has no such runs.
+    """
+    if ds.matched_start is None:
+        return None
+    if ds.matched_from is not None:
+        source = load_scores(ds.matched_from.name, method, seed)[0]
+    else:
+        source = load_scores(ds.name, method, seed)[1]
+    return [s[ds.matched_start:] for s in source] if source else None
 
 
 def quick_score(ds: D.Dataset, make_detector, far: float = FAR) -> dict:
@@ -109,11 +124,19 @@ def quick_score(ds: D.Dataset, make_detector, far: float = FAR) -> dict:
     make_detector() must return a fresh, unfitted detector. Returns the catch rate at `far`
     false alarms (calibrated the same way as the pilot) and the scores per run.
     """
-    scores = []
-    for r in ds.runs:
-        model = make_detector().fit(r.fit)
-        scores.append(M.normalise(model.score(r.X), model.score_fit(r.fit)))
-    out = M.dr_at_far(scores, [r.y for r in ds.runs], far, ds.calibration)
+    fitted: dict[int, tuple] = {}
+
+    def scored(r: D.Run) -> np.ndarray:
+        if id(r.fit) not in fitted:
+            model = make_detector().fit(r.fit)
+            fitted[id(r.fit)] = (model, model.score_fit(r.fit))
+        model, reference = fitted[id(r.fit)]
+        return M.normalise(model.score(r.X), reference)
+
+    scores = [scored(r) for r in ds.runs]
+    calib = ([scored(r)[ds.matched_start:] for r in ds.calibration_runs()]
+             if ds.calibration == "matched" else None)
+    out = M.dr_at_far(scores, [r.y for r in ds.runs], far, ds.calibration, calib)
     return {"caught": out["dr"], "false_alarms": out["far"], "scores": scores}
 
 
@@ -137,12 +160,27 @@ def _label(method: str) -> str:
     return det.REGISTRY[method].name
 
 
-def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int) -> dict:
-    labels = [r.y for r in ds.runs]
-    groups = [r.group for r in ds.runs]
+def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int,
+                   resample: str | list = "runs", keep: list | None = None,
+                   calibration: str | None = None) -> dict:
+    """Every method's catch rate on a dataset, from its cached scores, with intervals and paired gaps.
+
+    resample     what the intervals redraw: "runs" (single runs), "groups" (whole kinds of fault,
+                 every run of a drawn kind together), or a list with one label per run (runs that
+                 share a label are drawn together).
+    keep         optional True/False per run, to report on only part of the dataset.
+    calibration  how the alarm line is set, if not the dataset's own way (see data.Dataset).
+                 E.g. "pooled" on a Tennessee Eastman set gives the older first-8-hours line.
+    """
+    keep = [True] * len(ds.runs) if keep is None else list(keep)
+    kept = [r for r, k in zip(ds.runs, keep) if k]
+    labels = [r.y for r in kept]
+    groups = [r.group for r in kept]
+    clusters = {"runs": None, "groups": groups}[resample] if isinstance(resample, str) \
+        else [c for c, k in zip(resample, keep) if k]
     share = float(np.mean([y.mean() for y in labels]))
-    mode = ds.calibration
-    summary, by_group, primary = [], [], {}
+    mode = calibration or ds.calibration
+    summary, by_group, primary, calibs = [], [], {}, {}
     with_vus = M.vus_available()     # the VUS-PR column is left out when TSB-AD is not installed
     for m in methods:
         seeds = [s for s in _seeds(m, n_seeds) if _cache_path(ds.name, m, s).exists()]
@@ -151,8 +189,10 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int)
         per_seed = []
         for seed in seeds:
             runs, val, secs = load_scores(ds.name, m, seed)
-            p1 = M.dr_at_far(runs, labels, FAR, mode)
-            p5 = M.dr_at_far(runs, labels, 0.05, mode)
+            runs = [s for s, k in zip(runs, keep) if k]
+            cal = calibration_scores(ds, m, seed)
+            p1 = M.dr_at_far(runs, labels, FAR, mode, cal)
+            p5 = M.dr_at_far(runs, labels, 0.05, mode, cal)
             dep = M.deployable(runs, labels, FAR, val)
             per_seed.append({
                 "dr_at_1pct": p1["dr"], "far_check": p1["far"], "dr_at_5pct": p5["dr"],
@@ -164,8 +204,11 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int)
             })
             if with_vus:
                 per_seed[-1]["vus_pr_mean"] = np.mean([M.vus_pr(s, y) for s, y in zip(runs, labels)])
+            if cal and mode != "per_run":
+                # false alarms this line gives on fault-free runs, over the fault's stretch of a run
+                per_seed[-1]["far_late_fault_free"] = float(np.mean(np.concatenate(cal) > p1["threshold"]))
             if seed == seeds[0]:
-                primary[_label(m)] = runs
+                primary[_label(m)], calibs[_label(m)] = runs, cal
                 for g, v in M.dr_by_group(runs, labels, groups, p1["threshold"]).items():
                     by_group.append({"method": _label(m), "group": g, "dr_at_1pct": v})
         frame = pd.DataFrame(per_seed)
@@ -175,17 +218,176 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int)
         row["random_ap"] = share
         summary.append(row)
 
-    draws = S.bootstrap_dr(primary, labels, FAR, n_boot, mode=mode)
-    point = S.point_dr(primary, labels, FAR, mode)
+    calibs = calibs if mode == "matched" else None
+    draws = S.bootstrap_dr(primary, labels, FAR, n_boot, mode=mode, clusters=clusters, calib=calibs)
+    point = S.point_dr(primary, labels, FAR, mode, calibs)
     pairs = S.paired_differences(draws, point)
     for row in summary:
         lo, hi = np.nanquantile(draws[row["method"]], [0.05, 0.95])
         row["dr_ci90_low"], row["dr_ci90_high"] = float(lo), float(hi)
-    sds = np.array([p["sd"] for p in pairs])
+    sds = np.array([p["sd"] for p in pairs]) if pairs else np.array([np.nan])     # one method: no pairs
     # The wobble is measured and reported; the margin is the fixed MARGIN, not derived from it.
     noise = {"median_pair_sd": float(np.median(sds)), "max_pair_sd": float(np.max(sds)), "margin": MARGIN}
     return {"summary": summary, "by_group": by_group, "pairs": pairs, "noise": noise,
-            "runs": len(ds.runs), "anomaly_share": share, "calibration": mode}
+            "runs": len(kept), "anomaly_share": share, "calibration": mode}
+
+
+def rates(res: dict, digits: int = 2) -> pd.Series:
+    """Each method's catch rate with its 90% range as text, e.g. "0.81 (0.68-0.92)", best first."""
+    df = pd.DataFrame(res["summary"]).sort_values("dr_at_1pct", ascending=False)
+    text = [f"{r['dr_at_1pct']:.{digits}f} ({r['dr_ci90_low']:.{digits}f}-{r['dr_ci90_high']:.{digits}f})"
+            for _, r in df.iterrows()]
+    return pd.Series(text, index=df["method"].rename("detector"), name="catch rate")
+
+
+def report_old_and_new(ds: D.Dataset, methods: list[str] | None = None, n_seeds: int = 5, n_boot: int = 1000,
+                       **kw) -> dict:
+    """report_dataset twice: under the dataset's own alarm line ("new") and the older first-part line ("old").
+
+    For datasets with matched-window calibration (Tennessee Eastman). The old line is "pooled":
+    set on the scored runs' own normal part, which comes before the fault.
+    """
+    methods = methods or [k for k in METHODS if k in det.available()]
+    return {"new": report_dataset(ds, methods, n_seeds, n_boot, **kw),
+            "old": report_dataset(ds, methods, n_seeds, n_boot, calibration="pooled", **kw)}
+
+
+def old_and_new_table(pair: dict, digits: int = 2) -> pd.DataFrame:
+    """Per detector: catch rate under the old and the new alarm line (with ranges), and what changing the line did.
+
+    `pair` comes from report_old_and_new. "false alarms later, old line" is the share of fault-free
+    readings from the fault's stretch of a run that cross the old line (about 0.01 if the line is fair).
+    """
+    new = pd.DataFrame(pair["new"]["summary"]).set_index("method")
+    old = pd.DataFrame(pair["old"]["summary"]).set_index("method")
+    out = pd.DataFrame({"caught, old line": rates(pair["old"], digits), "caught, new line": rates(pair["new"], digits)})
+    out["change"] = (new["dr_at_1pct"] - old["dr_at_1pct"]).round(digits) + 0.0     # + 0.0: no "-0"
+    out["false alarms later, old line"] = old["far_late_fault_free"].round(3)
+    out = out.loc[new.sort_values("dr_at_1pct", ascending=False).index]
+    out.index.name = "detector"
+    return out
+
+
+def late_false_alarms(ds: D.Dataset, methods: list[str] | None = None, far: float = FAR,
+                      n_boot: int = 1000, seed: int = 0) -> pd.DataFrame:
+    """What the OLD alarm line lets through later in a run, when nothing is wrong.
+
+    The old line ("pooled" calibration) is set on the scored runs' own normal part, which comes
+    before the fault. This is the share of fault-free readings from the fault's stretch of a
+    run (the calibration runs) that cross that line. A detector whose score does not rise
+    during a run on its own gives about `far`.
+
+    Ranges redraw the scored runs (by run number, where runs have one) and the fault-free runs.
+    """
+    labels = [np.asarray(r.y, bool) for r in ds.runs]
+    clusters = [r.meta["run"] for r in ds.runs] if all("run" in r.meta for r in ds.runs) else None
+    rows = {}
+    for m in (methods or [k for k in METHODS if k in det.available()]):
+        scores = load_scores(ds.name, m, 0)[0]
+        normals = [s[~y] for s, y in zip(scores, labels)]
+        late = S.AlarmCounts(calibration_scores(ds, m, 0))
+        rng = np.random.default_rng(seed)
+        picks = rng.integers(0, len(late.sizes), (n_boot, len(late.sizes)))
+
+        def rate(idx, cal):
+            thr = np.quantile(np.concatenate([normals[i] for i in idx]), 1 - far)
+            return late.above(thr)[cal].sum() / late.sizes[cal].sum()
+
+        point = rate(np.arange(len(scores)), np.arange(len(late.sizes)))
+        draws = np.array([rate(idx, cal)
+                          for idx, cal in zip(S.resample_indices(len(scores), n_boot, rng, clusters), picks)])
+        lo, hi = S.interval(draws)
+        rows[_label(m)] = {"false alarms later, old line": point, "low": lo, "high": hi}
+    out = pd.DataFrame(rows).T
+    out.index.name = "detector"
+    return out
+
+
+def _twin_draws(ds: D.Dataset, twins: D.Dataset, method: str, far: float, n_boot: int, seed: int) -> dict:
+    """Alarm rates of every fault run and its twin at the matched alarm line, point values and resamples."""
+    faulty = S.AlarmCounts([s[np.asarray(r.y, bool)] for s, r in zip(load_scores(ds.name, method, 0)[0], ds.runs)])
+    twin = S.AlarmCounts([s[np.asarray(r.y, bool)] for s, r in zip(load_scores(twins.name, method, 0)[0], twins.runs)])
+    numbers = [r.meta["run"] for r in twins.runs]
+    faults = list(dict.fromkeys(r.group for r in ds.runs))
+    where = {(r.group, r.meta["run"]): i for i, r in enumerate(ds.runs)}
+    grid = np.array([[where[(f, n)] for n in numbers] for f in faults])       # (faults, run numbers)
+    rng = np.random.default_rng(seed)
+    line, lines = S.line_draws(calibration_scores(ds, method, 0), far, n_boot, rng)
+    number_picks = rng.integers(0, len(numbers), (n_boot, len(numbers)))
+    fault_picks = rng.integers(0, len(faults), (n_boot, len(faults)))
+
+    def at(thr, cols):
+        in_fault = faulty.rates(thr)[grid][:, cols]          # (faults, drawn run numbers)
+        in_twin = twin.rates(thr)[cols]
+        return in_fault.mean(1), in_twin.mean(), (in_fault - in_twin).mean(1)
+
+    point = at(line, np.arange(len(numbers)))
+    draws = [at(thr, cols) for thr, cols in zip(lines, number_picks)]
+    return {"faults": faults, "point": point, "fault_picks": fault_picks,
+            "caught": np.array([d[0] for d in draws]), "twin": np.array([d[1] for d in draws]),
+            "excess": np.array([d[2] for d in draws])}
+
+
+def excess_over_twin(ds: D.Dataset, twins: D.Dataset, method: str, far: float = FAR,
+                     n_boot: int = 1000, seed: int = 0) -> pd.DataFrame:
+    """One detector, fault by fault: its alarms in the fault runs minus its alarms in their twins.
+
+    `twins` holds the same runs with no fault (matched by meta["run"]). For each fault run, the
+    share of its fault hours above the alarm line, minus the share of the same hours above the
+    line in its twin, averaged over the runs of that fault. This is what the fault itself adds:
+    alarms the detector would have raised anyway do not count.
+
+    Ranges redraw the run numbers (a drawn number brings its run of every fault and its twin)
+    and the fault-free runs that set the alarm line.
+    """
+    d = _twin_draws(ds, twins, method, far, n_boot, seed)
+    caught, twin, excess = d["point"]
+    rows = {}
+    for j, f in enumerate(d["faults"]):
+        lo, hi = S.interval(d["excess"][:, j])
+        rows[f] = {"alarms in fault runs": caught[j], "alarms in twins": twin,
+                   "excess alarms over the twin": excess[j], "low": lo, "high": hi}
+    out = pd.DataFrame(rows).T
+    out.index.name = "kind of fault"
+    return out
+
+
+def excess_summary(ds: D.Dataset, twins: D.Dataset, methods: list[str] | None = None, far: float = FAR,
+                   n_boot: int = 1000, seed: int = 0) -> pd.DataFrame:
+    """Per detector, over all faults: excess alarms over the twin, and the alarms in the twins themselves.
+
+    The twins are fault-free, so a well-set alarm line gives about `far` alarms in them.
+    Ranges redraw the faults, the run numbers and the fault-free runs that set the alarm line.
+    """
+    rows = {}
+    for m in (methods or [k for k in METHODS if k in det.available()]):
+        d = _twin_draws(ds, twins, m, far, n_boot, seed)
+        caught, twin, excess = d["point"]
+        overall = np.array([e[p].mean() for e, p in zip(d["excess"], d["fault_picks"])])
+        lo, hi = S.interval(overall)
+        t_lo, t_hi = S.interval(d["twin"])
+        rows[_label(m)] = {"alarms in fault runs": caught.mean(), "alarms in twins": twin, "twins, low": t_lo,
+                           "twins, high": t_hi, "excess alarms over the twin": excess.mean(), "low": lo, "high": hi}
+    out = pd.DataFrame(rows).T
+    out.index.name = "detector"
+    return out
+
+
+def per_run_rates(ds: D.Dataset, method: str, group: str | None = None, far: float = FAR) -> pd.Series:
+    """Catch rate of every single run (optionally of one kind of fault), at the dataset's alarm line."""
+    scores = load_scores(ds.name, method, 0)[0]
+    labels = [r.y for r in ds.runs]
+    thr = M.dr_at_far(scores, labels, far, ds.calibration, calibration_scores(ds, method, 0))["threshold"]
+    thr = thr if np.ndim(thr) else [thr] * len(scores)
+    out = {r.name: float(np.mean(s[np.asarray(y, bool)] > t))
+           for r, s, y, t in zip(ds.runs, scores, labels, thr) if group is None or r.group == group}
+    return pd.Series(out, name="catch rate")
+
+
+def by_fault(res: dict, method: str) -> pd.Series:
+    """One detector's catch rate for every kind of fault, from a report_dataset() result (display name)."""
+    df = pd.DataFrame(res["by_group"])
+    return df[df["method"] == method].set_index("group")["dr_at_1pct"].rename(method)
 
 
 def gap_table(res: dict, method: str, others: list[str] | None = None) -> pd.DataFrame:
@@ -230,8 +432,10 @@ def _markdown(results: dict) -> str:
              "Intervals resample runs 1,000 times.", ""]
     for name, res in results.items():
         df = pd.DataFrame(res["summary"]).sort_values("dr_at_1pct", ascending=False)
-        how = ("one threshold per run, averaged over runs" if res["calibration"] == "per_run"
-               else "one threshold across all runs")
+        how = {"per_run": "one threshold per run, averaged over runs",
+               "pooled": "one threshold across all runs",
+               "matched": "one threshold, set on separate fault-free runs over the same hours of a run as the fault",
+               }[res["calibration"]]
         with_vus = "vus_pr_mean" in df
         head = ["Method", "DR @1% FA", "90% interval", "DR @5% FA", "Deployable FA", "Deployable DR",
                 "Events flagged", "Median delay (s)"] + (["VUS-PR"] if with_vus else []) + ["AP"]

@@ -165,12 +165,34 @@ class IsolationForestW(Detector):
         return -self.model_.score_samples(_windows(self._z(X), self.window))
 
 
+def nearest_window_distance(a: np.ndarray, b: np.ndarray, m: int, rows: int = 256) -> np.ndarray:
+    """Distance from every length-m stretch of series a to the most similar length-m stretch of series b.
+
+    Plain (non-normalised) Euclidean distance: the same numbers as stumpy.aamp(a, m, T_B=b), to
+    about 13 digits, but several times faster when b is long. The nearest stretch is found with
+    one matrix product per block of rows (|a - b|^2 = |a|^2 + |b|^2 - 2 a.b; |a|^2 is the same
+    along a row, so it is left out). That shortcut loses digits when a distance is tiny, so each
+    distance itself is then worked out directly from the two stretches.
+    """
+    A = np.lib.stride_tricks.sliding_window_view(np.asarray(a, float), m)
+    B = np.ascontiguousarray(np.lib.stride_tricks.sliding_window_view(np.asarray(b, float), m))
+    minus_2bt = np.ascontiguousarray(-2.0 * B.T)
+    b2 = (B ** 2).sum(1)
+    where = np.empty(len(A), int)
+    for i in range(0, len(A), rows):
+        d2 = A[i:i + rows] @ minus_2bt
+        d2 += b2
+        where[i:i + rows] = d2.argmin(1)
+    return np.sqrt(((A - B[where]) ** 2).sum(1))
+
+
 class MatrixProfileAB(Detector):
     """Per-channel matrix-profile AB-join against the fit data, non-normalised distances.
 
     Each length-m subsequence of X ending at t gets its distance to the nearest
     subsequence of the fit data; the score is the largest such distance across channels.
-    Non-normalised distances keep level shifts visible. Needs the `stumpy` package.
+    Non-normalised distances keep level shifts visible. Needs the `stumpy` package (used for
+    the fit data's own reference scores).
     """
     name = "Matrix Profile"
 
@@ -182,25 +204,39 @@ class MatrixProfileAB(Detector):
         self.fit_z_ = self._z(X)
         return self
 
-    def _profile(self, X, self_join: bool):
+    def _channel(self, Z, c, self_join: bool):
+        """One channel's distances, or None if the channel is constant in both series."""
         import warnings
-
-        import stumpy
-        Z = self._z(X)
-        out = np.zeros(len(Z))
-        for c in range(Z.shape[1]):
-            if np.ptp(self.fit_z_[:, c]) == 0 and np.ptp(Z[:, c]) == 0:
-                continue
+        if np.ptp(self.fit_z_[:, c]) == 0 and np.ptp(Z[:, c]) == 0:
+            return None
+        if self_join:      # nearest neighbour outside the trivial-match zone
+            import stumpy
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                if self_join:  # nearest neighbour outside the trivial-match zone
-                    mp = stumpy.aamp(Z[:, c].astype(float), self.m)[:, 0]
-                else:
-                    mp = stumpy.aamp(Z[:, c].astype(float), self.m,
-                                     T_B=self.fit_z_[:, c].astype(float), ignore_trivial=False)[:, 0]
-            mp = mp.astype(float)
-            d = np.concatenate([np.full(self.m - 1, mp[0]), mp]) / np.sqrt(self.m)
-            out = np.maximum(out, d)
+                mp = stumpy.aamp(Z[:, c].astype(float), self.m)[:, 0].astype(float)
+        else:
+            mp = nearest_window_distance(Z[:, c], self.fit_z_[:, c], self.m)
+        return np.concatenate([np.full(self.m - 1, mp[0]), mp]) / np.sqrt(self.m)
+
+    def _profile(self, X, self_join: bool):
+        Z = self._z(X)
+        channels = range(Z.shape[1])
+        if self_join:
+            parts = [self._channel(Z, c, True) for c in channels]
+        else:
+            # The channels are independent, and the arithmetic releases Python's lock, so they
+            # run side by side on threads. Each thread keeps to one core for its matrix products.
+            import os
+            from concurrent.futures import ThreadPoolExecutor
+
+            from threadpoolctl import threadpool_limits
+            with threadpool_limits(limits=1, user_api="blas"), \
+                    ThreadPoolExecutor(max_workers=min(len(channels), os.cpu_count() or 1)) as pool:
+                parts = list(pool.map(lambda c: self._channel(Z, c, False), channels))
+        out = np.zeros(len(Z))
+        for d in parts:
+            if d is not None:
+                out = np.maximum(out, d)
         return out
 
     def score(self, X):

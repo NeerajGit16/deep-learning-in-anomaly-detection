@@ -66,6 +66,95 @@ def test_link_residuals_go_through_scoring_and_report(tmp_path, monkeypatch):
     assert "nan" not in report and "0.12" in report
 
 
+def test_report_on_part_of_a_dataset_and_with_whole_kinds_resampled(tmp_path, monkeypatch):
+    monkeypatch.setattr(run, "CACHE", tmp_path)
+    ds = _toy(runs=8)
+    methods = ["rolling_z", "link_straight"]
+    for m in methods:
+        run.score_dataset(ds, m, seed=0)
+    full = run.report_dataset(ds, methods, 1, 100)
+    by_kind = run.report_dataset(ds, methods, 1, 100, resample="groups")
+    part = run.report_dataset(ds, methods, 1, 100, keep=[r.group == "level shift" for r in ds.runs])
+
+    def rate(res, name):
+        return next(r["dr_at_1pct"] for r in res["summary"] if r["method"] == name)
+
+    assert full["runs"] == by_kind["runs"] == 8 and part["runs"] == 4
+    assert rate(full, "Rolling z-score") == rate(by_kind, "Rolling z-score")       # same number, different range
+    assert {r["group"] for r in part["by_group"]} == {"level shift"}
+    assert rate(part, "Rolling z-score") > rate(full, "Rolling z-score")            # the level shifts are its easy half
+    assert run.by_fault(part, "Rolling z-score").index.tolist() == ["level shift"]
+    assert run.by_fault(full, "Rolling z-score")["link break"] < 0.3
+    text = run.rates(full)
+    assert list(text.index)[0] == "Straight-link residual" and "(" in text.iloc[0]
+    per_run = run.per_run_rates(ds, "rolling_z", group="link break")
+    assert len(per_run) == 4 and per_run.max() < 0.5
+
+
+def _drifting_toy(seed=0, numbers=12):
+    """Every run wanders slowly, fault or not. Faults: one that does nothing, one clear jump.
+    Returns the scored runs, their no-fault twins, both judged on separate fault-free runs."""
+    rng = np.random.default_rng(seed)
+    fit = rng.normal(size=(500, 3))
+    y = (np.arange(400) >= 100).astype(int)
+
+    def base():
+        return rng.normal(size=(400, 3)) + 0.002 * np.arange(400)[:, None]
+
+    separate = Dataset("toy_cal", [Run(f"cal/{i}", base(), y, fit, "no fault", {"run": 100 + i}) for i in range(30)],
+                       list("abc"), 1.0, matched_start=100)
+    faulty, twins = [], []
+    for r in range(numbers):
+        x = base()
+        twins.append(Run(f"nofault/{r}", x, y, fit, "no fault", {"run": r}))
+        faulty.append(Run(f"nothing/{r}", x.copy(), y, fit, "does nothing", {"run": r}))
+        jump = x.copy()
+        jump[100:, 0] += 8
+        faulty.append(Run(f"jump/{r}", jump, y, fit, "jump", {"run": r}))
+    kw = dict(calibration="matched", matched_start=100, matched_from=separate)
+    return Dataset("toy", faulty, list("abc"), 1.0, **kw), Dataset("toy_twins", twins, list("abc"), 1.0, **kw), separate
+
+
+def test_excess_alarms_over_the_twin(tmp_path, monkeypatch):
+    """A CUSUM chart's score rises with time in these runs. On the first-window line it 'catches'
+    a fault that does nothing. The matched line and the twins both show there is nothing there."""
+    monkeypatch.setattr(run, "CACHE", tmp_path)
+    ds, twins, separate = _drifting_toy()
+    for d in (ds, twins, separate):
+        run.score_dataset(d, "cusum", seed=0)
+
+    old = run.report_dataset(ds, ["cusum"], 1, 50, calibration="pooled")
+    new = run.report_dataset(ds, ["cusum"], 1, 50)
+    nothing = lambda res: next(r["dr_at_1pct"] for r in res["by_group"] if r["group"] == "does nothing")   # noqa: E731
+    assert old["calibration"] == "pooled" and new["calibration"] == "matched"
+    assert nothing(old) > 0.1 and nothing(new) < 0.05
+    assert old["summary"][0]["far_late_fault_free"] > 0.1                   # what the old line lets through later
+    assert abs(new["summary"][0]["far_late_fault_free"] - 0.01) < 0.002     # the matched line: 1 in 100 by construction
+    late = run.late_false_alarms(ds, ["cusum"], n_boot=100)
+    assert np.isclose(late.loc["CUSUM chart", "false alarms later, old line"], old["summary"][0]["far_late_fault_free"])
+    assert late.loc["CUSUM chart", "low"] <= late.iloc[0, 0] <= late.loc["CUSUM chart", "high"]
+
+    table = run.excess_over_twin(ds, twins, "cusum", n_boot=200)
+    assert abs(table.loc["does nothing", "excess alarms over the twin"]) < 1e-12
+    assert table.loc["does nothing", "low"] == table.loc["does nothing", "high"] == 0
+    assert table.loc["jump", "excess alarms over the twin"] > 0.9 and table.loc["jump", "low"] > 0.8
+    assert table.loc["jump", "alarms in twins"] < 0.1
+    overall = run.excess_summary(ds, twins, ["cusum"], n_boot=200)
+    row = overall.loc["CUSUM chart"]
+    assert np.isclose(row["excess alarms over the twin"], table["excess alarms over the twin"].mean())
+    assert row["low"] <= row["excess alarms over the twin"] <= row["high"]
+    assert run.per_run_rates(ds, "cusum", "jump").min() > 0.9
+
+
+def test_quick_score_uses_the_datasets_own_calibration():
+    ds, _, _ = _drifting_toy(numbers=6)
+    matched = run.quick_score(ds, lambda: det.make("cusum"))
+    ds.calibration = "pooled"
+    first_window = run.quick_score(ds, lambda: det.make("cusum"))
+    assert first_window["caught"] > matched["caught"]            # the jump is caught either way; the drift only by the old line
+    assert 0.45 < matched["caught"] < 0.56                       # half the runs have the jump, half have nothing
+
+
 def test_changing_a_setting_gives_a_new_cache_file(monkeypatch):
     before = run._cache_path("toy", "link_straight", 0)
     monkeypatch.setitem(run.METHODS, "link_straight", {"window": 9})

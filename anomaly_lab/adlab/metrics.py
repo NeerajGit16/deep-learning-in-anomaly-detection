@@ -23,12 +23,27 @@ def segments(y: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(edges[::2], edges[1::2]))
 
 
-def dr_at_far(scores: list, labels: list, far: float = 0.01, mode: str = "pooled") -> dict:
+def dr_at_far(scores: list, labels: list, far: float = 0.01, mode: str = "pooled",
+              calib: list | None = None) -> dict:
     """Detection rate at the threshold that gives `far` false alarms on normal samples.
 
-    mode="pooled": one threshold across all runs; DR over all anomalous samples.
+    mode="pooled": one threshold across all runs, from their own normal samples; DR over all
+        anomalous samples.
     mode="per_run": each run gets its own threshold; DR is the average over runs.
+    mode="matched": one threshold, from `calib`: scores of separate fault-free runs, already cut
+        to the same stretch of a run as the fault covers. DR over all anomalous samples.
+        "far_first_window" is then the false-alarm rate that line gives on the scored runs' own
+        normal samples.
     """
+    if mode == "matched":
+        if not calib:
+            raise ValueError("matched calibration needs scores of fault-free runs (calib)")
+        c = np.concatenate(calib)
+        thr = float(np.quantile(c, 1 - far))
+        s = np.concatenate(scores)
+        y = np.concatenate(labels).astype(bool)
+        return {"threshold": thr, "far": float(np.mean(c > thr)), "dr": float(np.mean(s[y] > thr)),
+                "far_first_window": float(np.mean(s[~y] > thr)) if (~y).any() else np.nan}
     if mode == "per_run":
         thr, dr, fa = [], [], []
         for s, y in zip(scores, labels):

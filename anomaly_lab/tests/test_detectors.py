@@ -67,6 +67,21 @@ def test_matrix_profile_flags_a_level_shift():
     assert dr_at_far([s], [y], 0.01)["dr"] > 0.5
 
 
+def test_fast_window_distances_match_stumpy():
+    """Matrix Profile scores runs with its own nearest-stretch search; it must give stumpy's distances."""
+    stumpy = pytest.importorskip("stumpy")
+    rng = np.random.default_rng(5)
+    smooth = np.cumsum(rng.normal(size=700))                     # wanders, like a slow sensor
+    stepped = np.round(rng.normal(size=700))                     # few distinct values: many stretches repeat exactly
+    for series in (rng.normal(size=700), smooth, stepped, 1e3 + stepped):
+        a, b = series[400:], series[:400]
+        for m in (4, 16):
+            ref = stumpy.aamp(a, m, T_B=b, ignore_trivial=False)[:, 0].astype(float)
+            got = det.nearest_window_distance(a, b, m, rows=64)
+            np.testing.assert_allclose(got, ref, rtol=1e-9, atol=1e-9)
+    assert (det.nearest_window_distance(stepped[400:], stepped[:400], 4) == 0).any()   # exact repeats give exactly 0
+
+
 # ---------------------------------------------------------------- link-residual detectors in the registry
 
 def test_link_residuals_are_registered_under_their_own_names():

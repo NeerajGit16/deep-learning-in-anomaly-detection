@@ -47,3 +47,44 @@ def test_fault_types_separates_a_level_fault_from_a_link_fault():
     table = S.fault_types(ds, with_curved=False)
     assert table.loc["level shift", "kind"] == "single sensor"
     assert table.loc["link break", "kind"] == "hidden from level checks"
+
+
+def test_fault_types_from_saved_scores_match_fresh_scoring(tmp_path, monkeypatch):
+    """saved=True must give the same table without fitting anything again, under either calibration."""
+    import pandas as pd
+
+    from adlab import run
+    monkeypatch.setattr(run, "CACHE", tmp_path)
+    fit, X_link, y = _break_case()
+    X_level = _break_case(seed=2)[1].copy()
+    X_level[250:, 1] = X_level[250:, 0]
+    X_level[250:, 2] += 6
+    quiet = [Run(f"normal{i}", _break_case(seed=10 + i)[0], np.zeros(500, int), fit, "normal") for i in range(3)]
+    ds = Dataset("toy", [Run("link", X_link, y, fit, "link break"), Run("level", X_level, y, fit, "level shift")],
+                 ["a", "b", "c"], 1.0, val_normal=quiet, calibration="matched", matched_start=250)
+    for key in ("rolling_z", "ewma", "cusum", "pca", "link_straight", "matrix_profile"):
+        run.score_dataset(ds, key, seed=0)
+    for calibration in ("matched", "pooled"):
+        fresh = S.fault_types(ds, with_curved=False, calibration=calibration)
+        saved = S.fault_types(ds, with_curved=False, saved=True, calibration=calibration)
+        pd.testing.assert_frame_equal(fresh, saved)
+    assert saved.loc["level shift", "kind"] == "single sensor"
+    assert saved.loc["link break", "kind"] == "hidden from level checks"
+
+
+def test_sensors_moved_follows_the_calibration():
+    """A sensor that wanders in the later part of every run, fault or not, should not count as moved by the fault."""
+    rng = np.random.default_rng(0)
+    fit = rng.normal(size=(500, 2))
+    y = (np.arange(300) >= 100).astype(int)
+
+    def run_with_late_wander():
+        x = rng.normal(size=(300, 2))
+        x[100:, 0] += 3            # sensor a sits higher late in every run: that is normal here
+        return x
+
+    quiet = [Run(f"n{i}", run_with_late_wander(), np.zeros(300, int), fit, "normal") for i in range(5)]
+    ds = Dataset("toy", [Run("r", run_with_late_wander(), y, fit, "nothing wrong")], ["a", "b"], 1.0,
+                 val_normal=quiet, calibration="matched", matched_start=100)
+    assert S.sensors_moved(ds) == [0]
+    assert S.sensors_moved(ds, calibration="pooled") == [1]

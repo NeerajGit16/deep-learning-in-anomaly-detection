@@ -92,30 +92,49 @@ def curvature_summary(X: np.ndarray, channels: list[str], k: int = 5, seed: int 
 
 # ---------------------------------------------------------------- what kind of fault is each fault?
 
-def _scores(ds: Dataset, make_detector) -> list[np.ndarray]:
-    fitted, out = {}, []
-    for r in ds.runs:
+def _scores(ds: Dataset, make_detector, with_calibration: bool = False):
+    """Score every run with a freshly fitted detector (one fit per distinct fit array).
+
+    with_calibration=True also returns the scores of the dataset's fault-free calibration runs,
+    cut to the stretch the fault covers (None if the dataset has none).
+    """
+    fitted = {}
+
+    def scored(r):
         key = id(r.fit)
         if key not in fitted:
             m = make_detector().fit(r.fit)
             fitted[key] = (m, m.score_fit(r.fit))
         m, ref = fitted[key]
-        out.append(M.normalise(m.score(r.X), ref))
-    return out
+        return M.normalise(m.score(r.X), ref)
+
+    out = [scored(r) for r in ds.runs]
+    if not with_calibration:
+        return out
+    cal = [scored(r)[ds.matched_start:] for r in ds.calibration_runs()] if ds.matched_start is not None else []
+    return out, (cal or None)
 
 
-def sensors_moved(ds: Dataset, far: float = 0.01, window: int = 5, share: float = 0.5) -> list[int]:
+def sensors_moved(ds: Dataset, far: float = 0.01, window: int = 5, share: float = 0.5,
+                  calibration: str | None = None) -> list[int]:
     """Per run: how many sensors, each judged alone, are out of range for most of the fault.
 
     A sensor counts if its own rolling average is beyond its own `far` false-alarm line in more
-    than `share` of the fault readings.
+    than `share` of the fault readings. Each sensor's line is set the same way as the detectors'
+    alarm lines (`calibration`, by default the dataset's own way).
     """
-    Zs = []
-    for r in ds.runs:
+    mode = calibration or ds.calibration
+
+    def rolled(r):
         mu, sd = _standardise(r.fit)
-        Zs.append(np.abs(det._trailing_mean((r.X - mu) / sd, window)))
+        return np.abs(det._trailing_mean((r.X - mu) / sd, window))
+
+    Zs = [rolled(r) for r in ds.runs]
     labels = [r.y.astype(bool) for r in ds.runs]
-    if ds.calibration == "pooled":
+    if mode == "matched":
+        late = np.concatenate([rolled(r)[ds.matched_start:] for r in ds.calibration_runs()])
+        thrs = [np.quantile(late, 1 - far, axis=0)] * len(Zs)
+    elif mode == "pooled":
         thr = np.quantile(np.concatenate([z[~y] for z, y in zip(Zs, labels)]), 1 - far, axis=0)
         thrs = [thr] * len(Zs)
     else:
@@ -124,7 +143,8 @@ def sensors_moved(ds: Dataset, far: float = 0.01, window: int = 5, share: float 
 
 
 def fault_types(ds: Dataset, far: float = 0.01, caught: float = 0.5, few: int = 3,
-                with_curved: bool = True, seed: int = 0) -> pd.DataFrame:
+                with_curved: bool = True, seed: int = 0, saved: bool = False,
+                calibration: str | None = None) -> pd.DataFrame:
     """One row per kind of fault: which family of checks can see it, and a label.
 
     level checks    best catch rate of the three per-sensor checks (rolling z-score, EWMA, CUSUM)
@@ -136,27 +156,36 @@ def fault_types(ds: Dataset, far: float = 0.01, caught: float = 0.5, few: int = 
                     'many sensors'             level checks catch it and more sensors move
                     'hidden from level checks' level checks miss it; links or shape in time catch it
                     'hard for all'             nothing here catches half of it
+
+    saved=True reads each detector's scores from results/cache (as written by run.score_all)
+    instead of fitting and scoring again. calibration sets how the alarm lines are drawn, if not
+    the dataset's own way.
     """
     labels = [r.y for r in ds.runs]
     groups = [r.group for r in ds.runs]
-    mode = ds.calibration
+    mode = calibration or ds.calibration
 
-    def by_group(make_detector):
-        sc = _scores(ds, make_detector)
-        thr = M.dr_at_far(sc, labels, far, mode)["threshold"]
+    def by_group(key):
+        if saved:
+            from . import run
+            sc, cal = run.load_scores(ds.name, key, 0)[0], run.calibration_scores(ds, key, 0)
+        else:
+            extra = {"seed": seed} if key == "link_curved" else {}
+            sc, cal = _scores(ds, lambda: det.make(key, **extra), with_calibration=True)
+        thr = M.dr_at_far(sc, labels, far, mode, cal)["threshold"]
         return pd.Series(M.dr_by_group(sc, labels, groups, thr))
 
-    def best(*makers):
-        return pd.concat([by_group(m) for m in makers], axis=1).max(axis=1)
+    def best(*keys):
+        return pd.concat([by_group(k) for k in keys], axis=1).max(axis=1)
 
-    cols = {"level checks": best(*[lambda k=k: det.make(k) for k in ("rolling_z", "ewma", "cusum")]),
-            "straight links": best(lambda: det.make("pca"), lambda: LinkResidual(curved=False, seed=seed))}
+    cols = {"level checks": best("rolling_z", "ewma", "cusum"),
+            "straight links": best("pca", "link_straight")}
     if with_curved:
-        cols["curved links"] = by_group(lambda: LinkResidual(curved=True, seed=seed))
+        cols["curved links"] = by_group("link_curved")
     if "matrix_profile" in det.available():
-        cols["shape in time"] = by_group(lambda: det.make("matrix_profile"))
+        cols["shape in time"] = by_group("matrix_profile")
     out = pd.DataFrame(cols)
-    moved = pd.Series(sensors_moved(ds, far), index=groups).groupby(level=0, sort=False).mean()
+    moved = pd.Series(sensors_moved(ds, far, calibration=mode), index=groups).groupby(level=0, sort=False).mean()
     out["sensors moved"] = moved.reindex(out.index).round(1)
     others = out.drop(columns=["level checks", "sensors moved"]).max(axis=1)
 
@@ -200,10 +229,12 @@ def link_detectors_overall(ds: Dataset, far: float = 0.01, n_boot: int = 1000) -
     """Catch rate of straight-link vs curved-link residual detectors, with the paired gap and its interval."""
     from . import stats
     labels = [r.y for r in ds.runs]
-    sc = {"Straight-link residual": _scores(ds, lambda: LinkResidual(False)),
-          "Curved-link residual": _scores(ds, lambda: LinkResidual(True))}
-    point = stats.point_dr(sc, labels, far, ds.calibration)
-    draws = stats.bootstrap_dr(sc, labels, far, n_boot, mode=ds.calibration)
+    sc, cal = {}, {}
+    for name, curved in (("Straight-link residual", False), ("Curved-link residual", True)):
+        sc[name], cal[name] = _scores(ds, lambda: LinkResidual(curved), with_calibration=True)
+    cal = cal if ds.calibration == "matched" else None
+    point = stats.point_dr(sc, labels, far, ds.calibration, cal)
+    draws = stats.bootstrap_dr(sc, labels, far, n_boot, mode=ds.calibration, calib=cal)
     gap = draws["Curved-link residual"] - draws["Straight-link residual"]
     return {"straight": point["Straight-link residual"], "curved": point["Curved-link residual"],
             "straight_ci": tuple(np.nanquantile(draws["Straight-link residual"], [0.05, 0.95])),

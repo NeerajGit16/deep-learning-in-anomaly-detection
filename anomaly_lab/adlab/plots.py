@@ -221,8 +221,10 @@ def how_scoring_works(df: pd.DataFrame, sensor: str, score: np.ndarray, x: str, 
 
 # ---------------------------------------------------------------- pilot results
 
-def pilot_overall(results: dict, far: float = 0.01):
+def pilot_overall(results: dict, far: float = 0.01, titles: dict | None = None):
+    """titles: optional display name per dataset key (default: the key in capitals)."""
     names = list(results)
+    titles = {n: n.upper() for n in names} | (titles or {})
     fig, axes = plt.subplots(1, len(names), figsize=(5.4 * len(names), 3.3), squeeze=False)
     for ax, name in zip(axes[0], names):
         df = pd.DataFrame(results[name]["summary"]).sort_values("dr_at_1pct")
@@ -237,13 +239,15 @@ def pilot_overall(results: dict, far: float = 0.01):
         ax.xaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
         ax.set_xlabel("share of fault samples caught at 1 false alarm in 100\n(dashed line = random guessing)")
         ax.grid(axis="x", color=GRID, lw=0.6)
-        ax.set_title(f"{name.upper()}: bars = range it could plausibly be")
+        ax.set_title(f"{titles[name]}: bars = range it could plausibly be")
     fig.tight_layout()
     return fig
 
 
-def pilot_by_type(results: dict):
+def pilot_by_type(results: dict, titles: dict | None = None):
+    """titles: optional display name per dataset key (default: the key in capitals)."""
     names = list(results)
+    titles = {n: n.upper() for n in names} | (titles or {})
     sizes = [len({r["group"] for r in results[n]["by_group"]}) for n in names]
     fig, axes = plt.subplots(len(names), 1, figsize=(12, 3.4 * len(names) + 0.12 * max(sizes)), squeeze=False)
     for ax, name in zip(axes[:, 0], names):
@@ -256,7 +260,7 @@ def pilot_by_type(results: dict):
                     color="white" if v > 0.6 else INK)
         ax.set_yticks(range(len(piv)), piv.index)
         ax.set_xticks(range(piv.shape[1]), piv.columns, rotation=40, ha="right", fontsize=7.5)
-        ax.set_title(f"{name.upper()}: % of fault samples caught at 1 false alarm in 100, by kind of fault")
+        ax.set_title(f"{titles[name]}: % of fault samples caught at 1 false alarm in 100, by kind of fault")
         for s in ax.spines.values():
             s.set_visible(False)
     fig.tight_layout()

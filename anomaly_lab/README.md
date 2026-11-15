@@ -34,13 +34,14 @@ uv run pytest                            # checks everything works
 | --- | --- |
 | `main.ipynb` | The notebook: run this |
 | `02_how_curved.ipynb` | First research results: how curved each dataset is, and what kind of fault each fault is |
-| `adlab/data.py` | Loads SKAB and Tennessee Eastman; plain-English sensor tables (`SKAB_INFO`, `TEP_INFO`) |
+| `03_fresh_runs.ipynb` | The same detectors on 1,000 Tennessee Eastman runs they have never seen (Rieth files): which results hold |
+| `adlab/data.py` | Loads SKAB and Tennessee Eastman (Braatz and Rieth files); plain-English sensor tables (`SKAB_INFO`, `TEP_INFO`) |
 | `adlab/explore.py` | Summary tables: faults per kind, how far each sensor moves, which sensors move together |
 | `adlab/plots.py` | All the figures |
 | `adlab/detectors.py` | The six simple detectors, plus the straight-link and curved-link residual detectors |
 | `adlab/structure.py` | Curvature measure and fault labelling |
 | `adlab/simulate.py` | A first small simulator with a curvature dial |
-| `adlab/metrics.py` | Catch rate at a fixed false-alarm rate, and other scores |
+| `adlab/metrics.py` | Catch rate at a fixed false-alarm rate, and other scores. For Tennessee Eastman the alarm line is set on fault-free readings from the same hours of a run as the faults |
 | `adlab/stats.py` | How much of a result could be luck (resampling) |
 | `adlab/run.py` | Scores every run with every detector and builds the results tables |
 | `tests/` | Checks that the code and data behave as expected |
@@ -62,3 +63,4 @@ uv run python -m adlab.run report    # writes results/pilot_report.md and figure
 - **Tennessee Eastman:**
   - Plant model: Downs and Vogel, 1993.
   - Data files: Braatz lab, University of Illinois, via https://github.com/camaramm/tennessee-eastman-profBraatz.
+  - Fresh runs: Rieth, Amsel, Tran and Cook, 2017, *Additional Tennessee Eastman Process Simulation Data for Anomaly Detection Evaluation*, Harvard Dataverse, [doi:10.7910/DVN/6C3JR1](https://doi.org/10.7910/DVN/6C3JR1) (public domain). About 910 MB, downloaded only when `03_fresh_runs.ipynb` is run or with `uv run python -m adlab.download tep_rieth`.
