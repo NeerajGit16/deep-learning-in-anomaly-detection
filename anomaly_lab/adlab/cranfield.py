@@ -11,8 +11,11 @@ import pandas as pd
 
 from . import data, progress, structure
 
-HEADLINE = ("T1", "T2", "T3")      # the go/no-go measure uses all three normal runs
-WITHOUT_T3 = ("T1", "T2")          # shown beside it: T3 holds over half of some sensors' movement
+# The outlier-run rule (fixed before this data was looked at): if one run holds more than half
+# of any sensor's movement, report with and without it and headline the version without. T3
+# does (a warmer day, a lower separator level), so the headline is T1 + T2.
+HEADLINE = ("T1", "T2")
+WITH_T3 = ("T1", "T2", "T3")       # shown beside it
 
 # Past readings of the other sensors offered to the models, in readings (= seconds) back.
 # The first four cover the same span of time as 1, 2, 5, 10 readings on the chemical plant
@@ -120,11 +123,12 @@ def best_partner(names: tuple = HEADLINE, sensors: list | None = None) -> pd.Dat
     return out
 
 
-def curved_scatter(by_name: dict, names: tuple = HEADLINE, name: str = SAME_MOMENT):
-    """Each sensor that gains over 10 points from curves, plotted against its best single predictor
-    and coloured by flow setting (plots.scatter_by_setting), to see a real curve from separate clusters."""
+def curved_scatter(by_name: dict, names: tuple = HEADLINE, name: str = SAME_MOMENT, sensors: list | None = None):
+    """Each sensor that gains over 10 points from curves (or the `sensors` given), plotted against its
+    best single predictor and coloured by flow setting (plots.scatter_by_setting), to tell a real
+    curve from separate clusters. Uses the readings of the runs in `names`."""
     from . import plots
-    sensors = most_curved(by_name, name)
+    sensors = sensors or most_curved(by_name, name)
     partners = best_partner(names, sensors)["best single predictor"]
     runs, labels = normal(names)
     info = data.CRANFIELD_INFO.set_index("sensor")

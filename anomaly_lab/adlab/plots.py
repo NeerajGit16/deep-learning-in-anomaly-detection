@@ -289,27 +289,33 @@ def dial_check(df: pd.DataFrame):
 
 
 def curved_share(summaries: dict, title: str = "How curved are the links between sensors? Bars = plausible range",
-                 low: str = "curved_low", high: str = "curved_high", mark: float | None = None):
+                 low: str = "curved_low", high: str = "curved_high", mark: float | None = None, points: bool = False):
     """One row per dataset: average curved share with its 90% interval.
 
     low, high   which range to draw (e.g. "curved_low_units" for the range from resampling visits)
     mark        draw a second dashed line at this value (e.g. 0.03, the go/no-go mark)
+    points      label the axis in points with one decimal place (+2.2) instead of whole percent
     """
+    def show(v):
+        return f"{100 * v:+.1f}" if points else f"{v:+.1%}"
+
     names = list(summaries)[::-1]
     fig, ax = plt.subplots(figsize=(7.2, 0.6 * len(names) + 1.5))
     if mark is not None:
         ax.axvline(mark, color=ORANGE, lw=1, ls=(0, (3, 3)))
-        ax.text(mark, len(names) - 0.35, f" {mark:+.0%} mark", color=ORANGE, fontsize=8, va="top")
+        ax.text(mark, len(names) - 0.35, f" {100 * mark:+.0f} point mark" if points else f" {mark:+.0%} mark",
+                color=ORANGE, fontsize=8, va="top")
     for i, n in enumerate(names):
         s = summaries[n]
         ax.hlines(i, s[low], s[high], color=BLUE, lw=2)
         ax.plot(s["curved"], i, "o", color=BLUE, ms=7, mec=BG, mew=1.5)
-        ax.text(s["curved"], i + 0.25, f"{s['curved']:+.1%}", ha="center", fontsize=8, color=INK)
+        ax.text(s["curved"], i + 0.25, show(s["curved"]), ha="center", fontsize=8, color=INK)
     ax.axvline(0, color=INK2, lw=1, ls=(0, (3, 3)))
     ax.set_yticks(range(len(names)), names)
     ax.set_ylim(-0.6, len(names) - 0.3)
-    ax.xaxis.set_major_formatter(lambda v, _: f"{v:+.0%}")
-    ax.set_xlabel("extra share of sensor movement explained by curves (0 = links are straight)")
+    ax.xaxis.set_major_formatter((lambda v, _: f"{100 * v:+.1f}") if points else (lambda v, _: f"{v:+.0%}"))
+    ax.set_xlabel("extra share explained by curves, in points (0 = links are straight)" if points
+                  else "extra share of sensor movement explained by curves (0 = links are straight)")
     ax.grid(axis="x", color=GRID, lw=0.6)
     ax.set_title(title)
     fig.tight_layout()
@@ -349,11 +355,11 @@ def curved_by_sensor(table: pd.DataFrame, title: str, low: str = "curved, low (v
     ax.axvline(0, color=INK2, lw=1, ls=(0, (3, 3)))
     if mark is not None:
         ax.axvline(mark, color=ORANGE, lw=1, ls=(0, (3, 3)))
-        ax.text(mark, len(t) - 0.4, f" {mark:+.0%}", color=ORANGE, fontsize=8, va="top")
+        ax.text(mark, len(t) - 0.4, f" {100 * mark:+.0f} points", color=ORANGE, fontsize=8, va="top")
     labels = [f"{w} ({s})" for s, w in zip(t.index, t["what it measures"])] if "what it measures" in t else list(t.index)
     ax.set_yticks(y, labels, fontsize=8)
-    ax.xaxis.set_major_formatter(lambda v, _: f"{v:+.0%}")
-    ax.set_xlabel("extra share of the sensor's movement explained by curves")
+    ax.xaxis.set_major_formatter(lambda v, _: f"{100 * v:+.0f}")
+    ax.set_xlabel("extra share of the sensor's movement explained by curves, in points")
     ax.grid(axis="x", color=GRID, lw=0.6)
     ax.set_title(title)
     fig.tight_layout()
@@ -384,6 +390,7 @@ def scatter_by_setting(X: np.ndarray, label: np.ndarray, pairs: list, names: lis
 
     If the points of every setting fall along one bent line, the link is a real curve. If each
     setting sits in its own cluster, off any common line, the "curve" is level shifts between settings.
+    The left panel's title names the sensor on the upright axis; it is coloured by water flow.
     """
     describe = describe or {}
     keep = np.arange(0, len(X), every)
@@ -404,7 +411,7 @@ def scatter_by_setting(X: np.ndarray, label: np.ndarray, pairs: list, names: lis
             ax.set_ylabel(target)
             ax.grid(color=GRID, lw=0.6)
             ax.legend(title=what, fontsize=7, title_fontsize=7, markerscale=3, frameon=False, loc="best")
-        row[0].set_title(f"{describe.get(target, target)}: coloured by water flow")
+        row[0].set_title(describe.get(target, target))
         row[1].set_title("the same points, coloured by air flow")
     fig.tight_layout()
     return fig
