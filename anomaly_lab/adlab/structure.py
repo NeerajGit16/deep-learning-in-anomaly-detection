@@ -1,6 +1,7 @@
 """Two questions about a dataset, answered before any deep model is trained.
 
-1. How curved are the links between sensors?      -> link_strength(), curvature_summary()
+1. How curved are the links between sensors?      -> link_strength(), curvature_summary(),
+                                                     curvature_by_run(), curvature_by_lag()
 2. What kind of fault is each fault?              -> fault_types()
 
 Idea behind (1): predict each sensor from all the others, on normal data. First with a
@@ -16,6 +17,7 @@ import pandas as pd
 
 from . import detectors as det
 from . import metrics as M
+from . import progress
 from .data import Dataset
 # The link-residual detector and its models live in detectors.py (next to the registry).
 # They are imported here so structure.LinkResidual and structure.blocked_folds keep working.
@@ -27,28 +29,83 @@ def _standardise(X: np.ndarray):
     return mu, np.where(sd > 1e-9, sd, 1.0)
 
 
-def held_out_predictions(X: np.ndarray, k: int = 5, seed: int = 0):
-    """For every sensor: its held-out prediction from the other sensors, straight and straight+flexible.
+def _lagged(Z: np.ndarray, lags: tuple) -> tuple[np.ndarray, np.ndarray]:
+    """One run as (targets, features), from the first reading that has all its past readings.
 
-    Returns (Z, straight, both), all (n, d) in standardised units. Constant sensors are predicted as 0.
+    Features are every sensor's reading now, then every sensor's reading at each lag back, side
+    by side: columns 0..d-1 are "now", d..2d-1 the first lag, and so on.
     """
-    mu, sd = _standardise(X)
-    Z = (X - mu) / sd
-    n, d = Z.shape
-    live = X.std(0) > 1e-9
+    back = max(lags, default=0)
+    return Z[back:], np.hstack([Z[back - lag: len(Z) - lag] for lag in (0, *lags)])
+
+
+def held_out_by_run(runs: list, k: int = 5, seed: int = 0, lags: tuple = (), verbose: bool = True,
+                    what: str = "curvature measure") -> dict:
+    """For every sensor: its held-out prediction from the OTHER sensors, straight and straight+flexible.
+
+    runs   list of (readings, sensors) arrays: separate recordings of the same sensors. They are
+           put on one scale together (pooled mean and spread).
+    lags   which past readings of the other sensors the models may also use, in readings back,
+           e.g. (1, 2, 5). () means only the reading taken at the same moment. A sensor's own
+           past is never used. Lagged readings never reach across two runs.
+
+    Held-out data: every run is cut into k blocks of time; fold f holds out the f-th block of
+    every run. So every run (every setting, if runs were made at different settings) is in the
+    training data of every fold. With lags, training readings closer than the longest lag to a
+    held-out block of the same run are left out, so no reading is on both sides.
+
+    Returns a dict of arrays over all kept readings: "Z" (standardised targets), "straight" and
+    "both" (predictions), "run" (which run each reading came from). Constant sensors are predicted as 0.
+    """
+    lags = tuple(lags)
+    stacked = np.vstack(runs)
+    mu, sd = _standardise(stacked)
+    live = stacked.std(0) > 1e-9
+    d, back = stacked.shape[1], max(lags, default=0)
+    targets, features, run_id, fold_id = [], [], [], []
+    for r, X in enumerate(runs):
+        y, F = _lagged((X - mu) / sd, lags)
+        fold = np.empty(len(y), int)
+        for f, idx in enumerate(blocked_folds(len(y), k)):
+            fold[idx] = f
+        targets.append(y), features.append(F), run_id.append(np.full(len(y), r)), fold_id.append(fold)
+    Z, F = np.vstack(targets), np.vstack(features)
+    run_id, fold_id = np.concatenate(run_id), np.concatenate(fold_id)
+    position = np.concatenate([np.arange(len(t)) for t in targets])
+    sensor_of_column = np.tile(np.arange(d), 1 + len(lags))
     lin, both = np.zeros_like(Z), np.zeros_like(Z)
-    for test in blocked_folds(n, k):
-        train = np.setdiff1d(np.arange(n), test)
+    steps = progress.track(range(k * int(live.sum())), f"{what} (models fitted)", verbose=verbose)
+    for f in range(k):
+        test = fold_id == f
+        if not test.any():
+            continue
+        train = ~test
+        if back:      # leave a gap of `back` readings around each run's held-out block
+            for r in np.unique(run_id[test]):
+                held = position[test & (run_id == r)]
+                near = (run_id == r) & (position >= held.min() - back) & (position <= held.max() + back)
+                train &= ~near
         for j in np.flatnonzero(live):
-            others = live.copy()
-            others[j] = False
-            A, y = Z[train][:, others], Z[train, j]
+            cols = live[sensor_of_column] & (sensor_of_column != j)
+            A, y = F[train][:, cols], Z[train, j]
             m1 = _straight().fit(A, y)
             m2 = _flexible(seed).fit(A, y - m1.predict(A))
-            p = m1.predict(Z[test][:, others])
+            p = m1.predict(F[test][:, cols])
             lin[test, j] = p
-            both[test, j] = p + m2.predict(Z[test][:, others])
-    return Z, lin, both
+            both[test, j] = p + m2.predict(F[test][:, cols])
+            next(steps, None)
+    for _ in steps:      # let the bar finish and close
+        pass
+    return {"Z": Z, "straight": lin, "both": both, "run": run_id}
+
+
+def held_out_predictions(X: np.ndarray, k: int = 5, seed: int = 0, lags: tuple = (), verbose: bool = True):
+    """held_out_by_run for one recording. Returns (Z, straight, both), all in standardised units.
+
+    With lags, the first max(lags) readings have no complete past and are dropped from all three.
+    """
+    out = held_out_by_run([X], k, seed, lags, verbose)
+    return out["Z"], out["straight"], out["both"]
 
 
 def _r2(y: np.ndarray, p: np.ndarray) -> np.ndarray:
@@ -56,13 +113,14 @@ def _r2(y: np.ndarray, p: np.ndarray) -> np.ndarray:
     return 1 - ((y - p) ** 2).sum(0) / np.where(ss > 0, ss, 1.0)
 
 
-def link_strength(X: np.ndarray, channels: list[str], k: int = 5, seed: int = 0) -> pd.DataFrame:
+def link_strength(X: np.ndarray, channels: list[str], k: int = 5, seed: int = 0, lags: tuple = ()) -> pd.DataFrame:
     """Per sensor: share of its movement explained by the other sensors, on held-out time blocks.
 
     straight   explained by a straight-line model
     curved     extra explained once a flexible model is added on top (about 0 if links are straight)
+    lags       past readings of the other sensors the models may also use (see held_out_by_run)
     """
-    Z, lin, both = held_out_predictions(X, k, seed)
+    Z, lin, both = held_out_predictions(X, k, seed, lags)
     r_lin, r_both = _r2(Z, lin), _r2(Z, both)
     out = pd.DataFrame({"straight": r_lin, "curved": r_both - r_lin, "total": r_both}, index=channels)
     out.index.name = "sensor"
@@ -70,12 +128,14 @@ def link_strength(X: np.ndarray, channels: list[str], k: int = 5, seed: int = 0)
 
 
 def curvature_summary(X: np.ndarray, channels: list[str], k: int = 5, seed: int = 0,
-                      n_boot: int = 500) -> dict:
+                      n_boot: int = 500, lags: tuple = ()) -> dict:
     """One line per dataset: average straight and curved shares, with a 90% interval on the curved share.
 
-    The interval resamples blocks of time (20 blocks), so it respects that neighbouring readings look alike.
+    For one long recording. The interval resamples blocks of time (20 blocks), so it respects that
+    neighbouring readings look alike. For several separate runs use curvature_by_run, which
+    resamples runs. `lags`: past readings of the other sensors the models may also use.
     """
-    Z, lin, both = held_out_predictions(X, k, seed)
+    Z, lin, both = held_out_predictions(X, k, seed, lags)
     table = pd.DataFrame({"straight": _r2(Z, lin), "curved": _r2(Z, both) - _r2(Z, lin)}, index=channels)
     blocks = blocked_folds(len(Z), 20)
     ss = np.where(((Z - Z.mean(0)) ** 2).sum(0) > 0, ((Z - Z.mean(0)) ** 2).sum(0), 1.0) / len(Z)
@@ -87,7 +147,109 @@ def curvature_summary(X: np.ndarray, channels: list[str], k: int = 5, seed: int 
     return {"sensors": len(channels), "readings": len(Z),
             "straight": float(table["straight"].mean()), "curved": float(table["curved"].mean()),
             "curved_low": float(lo), "curved_high": float(hi),
-            "sensors_with_curved_over_5pts": int((table["curved"] > 0.05).sum()), "table": table}
+            "sensors_with_curved_over_5pts": int((table["curved"] > 0.05).sum()),
+            "sensors_with_curved_over_10pts": int((table["curved"] > 0.10).sum()), "table": table}
+
+
+def curvature_by_run(runs: list, channels: list[str], k: int = 5, seed: int = 0, n_boot: int = 500,
+                     lags: tuple = (), verbose: bool = True, what: str = "curvature measure") -> dict:
+    """The curvature measure for several separate runs, with ranges from resampling whole runs.
+
+    Same measure as curvature_summary (see held_out_by_run for how readings are held out), and the
+    same keys in the answer, plus "runs", "straight_low"/"straight_high", and per sensor in
+    "table": its straight share, its curved share and the 90% range of its curved share.
+
+    Each resample draws runs with replacement and recomputes every share from the drawn runs'
+    held-out errors (the models are not refitted). With very few runs the ranges are rough.
+    """
+    h = held_out_by_run(runs, k, seed, lags, verbose, what)
+    Z = h["Z"] - h["Z"].mean(0)
+    n_runs = len(runs)
+
+    def per_run(values):                                   # (runs, sensors): sum over each run's readings
+        out = np.zeros((n_runs, values.shape[1]))
+        np.add.at(out, h["run"], values)
+        return out
+
+    total = per_run(Z ** 2)
+    err_lin, err_both = per_run((h["Z"] - h["straight"]) ** 2), per_run((h["Z"] - h["both"]) ** 2)
+
+    def shares(idx):
+        t = total[idx].sum(0)
+        t = np.where(t > 0, t, 1.0)
+        return 1 - err_lin[idx].sum(0) / t, (err_lin[idx].sum(0) - err_both[idx].sum(0)) / t
+
+    straight, curved = shares(np.arange(n_runs))
+    rng = np.random.default_rng(seed)
+    draws = [shares(idx) for idx in rng.integers(0, n_runs, (n_boot, n_runs))]
+    s_draws, c_draws = np.array([d[0] for d in draws]), np.array([d[1] for d in draws])
+    table = pd.DataFrame({"straight": straight, "curved": curved,
+                          "curved_low": np.quantile(c_draws, 0.05, axis=0),
+                          "curved_high": np.quantile(c_draws, 0.95, axis=0)}, index=channels)
+    table.index.name = "sensor"
+    lo, hi = np.quantile(c_draws.mean(1), [0.05, 0.95])
+    s_lo, s_hi = np.quantile(s_draws.mean(1), [0.05, 0.95])
+    return {"sensors": len(channels), "readings": len(Z), "runs": n_runs,
+            "straight": float(straight.mean()), "straight_low": float(s_lo), "straight_high": float(s_hi),
+            "curved": float(curved.mean()), "curved_low": float(lo), "curved_high": float(hi),
+            "sensors_with_curved_over_5pts": int((curved > 0.05).sum()),
+            "sensors_with_curved_over_10pts": int((curved > 0.10).sum()), "table": table}
+
+
+def movement_by_run(runs: list, channels: list[str], names: list | None = None) -> pd.DataFrame:
+    """Per sensor: how unevenly its movement is spread over the runs.
+
+    "largest share" is the share of the sensor's pooled movement (squared distance from the
+    pooled mean, summed over readings) that comes from a single run; "run" says which one;
+    "even share" is what every run would hold if they were all alike (1 / number of runs).
+
+    Worth a look before trusting the ranges of curvature_by_run. If one run holds nearly all of
+    a sensor's movement, that sensor's share is really a statement about that one run, and a
+    resample that happens to leave the run out measures something else: the ranges blow up.
+    """
+    centre = np.vstack(runs).mean(0)
+    per_run = np.array([((np.asarray(X) - centre) ** 2).sum(0) for X in runs])
+    total = per_run.sum(0)
+    share = per_run / np.where(total > 0, total, 1.0)
+    names = list(names) if names is not None else list(range(len(runs)))
+    out = pd.DataFrame({"largest share": share.max(0), "run": [names[i] for i in share.argmax(0)],
+                        "even share": 1 / len(runs)}, index=channels)
+    out.index.name = "sensor"
+    return out
+
+
+LAG_SETS = {"same moment only": (), "+ 1 back": (1,), "+ 1, 2 back": (1, 2), "+ 1, 2, 5 back": (1, 2, 5),
+            "+ 1, 2, 5, 10 back": (1, 2, 5, 10)}
+
+
+def curvature_by_lag(runs: list, channels: list[str], lag_sets: dict | None = None, k: int = 5, seed: int = 0,
+                     n_boot: int = 500, verbose: bool = True, what: str = "curvature", cache: str | None = None) -> dict:
+    """curvature_by_run once per set of lags. Returns {name of the lag set: summary}.
+
+    cache: a name under which each set's answer is saved in results/cache as soon as it is done
+    (see cached), so a long run that is interrupted picks up where it stopped.
+    """
+    out = {}
+    for name, lags in (lag_sets or LAG_SETS).items():
+        def compute(lags=lags, name=name):
+            return curvature_by_run(runs, channels, k, seed, n_boot, lags, verbose, f"{what}, {name}")
+        out[name] = cached(f"{cache}__lags_{'_'.join(map(str, lags)) or 'none'}", compute) if cache else compute()
+    return out
+
+
+def lag_table(by_lag: dict) -> pd.DataFrame:
+    """One row per set of lags: the average shares, the curved share's range, and how many sensors gain from curves."""
+    rows = {name: {"straight share": s["straight"], "straight, low": s.get("straight_low", np.nan),
+                   "straight, high": s.get("straight_high", np.nan),
+                   "curved share": s["curved"], "curved, low": s["curved_low"],
+                   "curved, high": s["curved_high"],
+                   "sensors gaining over 0.05 from curves": s["sensors_with_curved_over_5pts"],
+                   "sensors gaining over 0.10 from curves": s["sensors_with_curved_over_10pts"]}
+            for name, s in by_lag.items()}
+    out = pd.DataFrame(rows).T.astype({"sensors gaining over 0.05 from curves": int,
+                                       "sensors gaining over 0.10 from curves": int})
+    out.index.name = "other sensors' readings used"
+    return out
 
 
 # ---------------------------------------------------------------- what kind of fault is each fault?
@@ -211,6 +373,32 @@ def cached(name: str, compute, refresh: bool = False):
     out = compute()
     CACHE.mkdir(parents=True, exist_ok=True)
     path.write_bytes(pickle.dumps(out))
+    return out
+
+
+def lag_check(n: int = 3000, delay: int = 2, verbose: bool = True) -> pd.DataFrame:
+    """The lag option on made-up data where the truth is known (simulate.delayed_sensors).
+
+    One sensor follows another `delay` readings late, once as a straight-line copy and once as a
+    curved function. Rows: which past readings were offered. Columns: the follower's straight and
+    curved share in each case. The link should appear only once the right past reading is offered,
+    as straight share in the first case and as curved share in the second. The driver changes at
+    random from reading to reading, so a past reading other than the right one is no help:
+    `delay` has to be one of the lags offered for the link to show at all.
+    """
+    from .simulate import delayed_sensors
+    sets = {"same moment only": (), "+ 1 back": (1,), "+ 1, 2 back": (1, 2), "+ 1, 2, 5 back": (1, 2, 5)}
+    if not any(delay in lags for lags in sets.values()):
+        raise ValueError(f"delay={delay} is not among the lags offered, so the check could show nothing")
+    cols = {}
+    for label, curve in (("straight link", 0.0), ("curved link", 1.0)):
+        by_lag = curvature_by_lag([delayed_sensors(n, delay, curve)], ["driver", "follower", "unrelated"], sets,
+                                  n_boot=20, verbose=verbose, what=f"check, {label}")
+        for share in ("straight", "curved"):
+            cols[(f"{label}, {delay} readings late", f"{share} share")] = {
+                name: s["table"].loc["follower", share] for name, s in by_lag.items()}
+    out = pd.DataFrame(cols)
+    out.index.name = "other sensors' readings used"
     return out
 
 

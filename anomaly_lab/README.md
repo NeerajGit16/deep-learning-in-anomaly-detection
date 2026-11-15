@@ -35,6 +35,7 @@ uv run pytest                            # checks everything works
 | `main.ipynb` | The notebook: run this |
 | `02_how_curved.ipynb` | First research results: how curved each dataset is, and what kind of fault each fault is |
 | `03_fresh_runs.ipynb` | The same detectors on 1,000 Tennessee Eastman runs they have never seen (Rieth files): which results hold |
+| `04_delayed_links.ipynb` | Whether links that arrive late (one sensor following another after a delay) change the picture |
 | `adlab/data.py` | Loads SKAB and Tennessee Eastman (Braatz and Rieth files); plain-English sensor tables (`SKAB_INFO`, `TEP_INFO`) |
 | `adlab/explore.py` | Summary tables: faults per kind, how far each sensor moves, which sensors move together |
 | `adlab/plots.py` | All the figures |
@@ -44,8 +45,15 @@ uv run pytest                            # checks everything works
 | `adlab/metrics.py` | Catch rate at a fixed false-alarm rate, and other scores. For Tennessee Eastman the alarm line is set on fault-free readings from the same hours of a run as the faults |
 | `adlab/stats.py` | How much of a result could be luck (resampling) |
 | `adlab/run.py` | Scores every run with every detector and builds the results tables |
+| `adlab/progress.py` | Progress bars for the slow steps, and a progress log for jobs running in the background |
 | `tests/` | Checks that the code and data behave as expected |
 | `results/` | Saved scores, tables and figures |
+
+## Slow steps
+
+Anything slow (scoring runs, the curvature measure, resampling, downloads) shows a progress bar with the time remaining. Pass `verbose=False` to switch a bar off.
+
+To follow a job running in the background, set `ADLAB_PROGRESS_LOG=1` before starting it. It then writes one line per step to `results/progress.log`: the time, what finished, how many are done out of how many, and the estimated time left.
 
 ## Command-line version
 

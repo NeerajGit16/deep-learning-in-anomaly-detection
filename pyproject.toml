@@ -11,6 +11,7 @@ dependencies = [
     "scipy>=1.18.1",
     "stumpy>=1.14.1",
     "threadpoolctl>=3.7.0",
+    "tqdm>=4.70.1",
 ]
 
 [dependency-groups]

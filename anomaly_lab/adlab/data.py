@@ -21,6 +21,8 @@ from pathlib import Path, PurePosixPath
 import numpy as np
 import pandas as pd
 
+from . import progress
+
 ROOT = Path(__file__).resolve().parents[1]
 RAW = ROOT / "data" / "raw"
 
@@ -67,14 +69,26 @@ class Dataset:
         return self.matched_from.runs if self.matched_from is not None else (self.val_normal or [])
 
 
-def download(name: str, raw: Path = RAW) -> Path:
+def _chunks(response, what: str, verbose: bool, size: int = 1 << 20):
+    """The response's bytes in 1 MB pieces, with a progress bar when the server says how many there are."""
+    length = response.headers.get("Content-Length")
+    total = -(-int(length) // size) if length else None
+
+    def pieces():
+        while chunk := response.read(size):
+            yield chunk
+
+    yield from progress.track(pieces(), what, total=total, verbose=verbose)
+
+
+def download(name: str, raw: Path = RAW, verbose: bool = True) -> Path:
     """Fetch a dataset's GitHub archive and unpack it into data/raw/<name>. Skips if already there."""
     target = raw / name
     if target.exists() and any(target.iterdir()):
         return target
     target.mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(SOURCES[name], timeout=180) as response:
-        blob = response.read()
+        blob = b"".join(_chunks(response, f"downloading {name} (MB)", verbose))
     with zipfile.ZipFile(io.BytesIO(blob)) as archive:
         for member in archive.namelist():
             parts = PurePosixPath(member).parts[1:]  # drop the "<repo>-master/" folder
@@ -208,7 +222,7 @@ RIETH_FAULTS = range(1, 21)   # this set has faults 1-20; fault 21 of the Braatz
 RIETH_ONSET = 160
 
 
-def download_rieth(raw: Path = RAW, kinds=tuple(RIETH_FILES)) -> Path:
+def download_rieth(raw: Path = RAW, kinds=tuple(RIETH_FILES), verbose: bool = True) -> Path:
     """Fetch the Rieth .RData files (about 910 MB in all) into data/raw/tep_rieth. Skips files already there."""
     target = raw / "tep_rieth"
     target.mkdir(parents=True, exist_ok=True)
@@ -222,7 +236,7 @@ def download_rieth(raw: Path = RAW, kinds=tuple(RIETH_FILES)) -> Path:
                                          headers={"User-Agent": "adlab-data-loader/0.1"})
         part, digest = out.with_suffix(".part"), hashlib.md5()
         with urllib.request.urlopen(request, timeout=180) as response, open(part, "wb") as f:
-            while chunk := response.read(1 << 20):
+            for chunk in _chunks(response, f"downloading {name} (MB)", verbose):
                 f.write(chunk)
                 digest.update(chunk)
         if digest.hexdigest() != md5:

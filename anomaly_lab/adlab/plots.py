@@ -288,7 +288,7 @@ def dial_check(df: pd.DataFrame):
     return fig
 
 
-def curved_share(summaries: dict):
+def curved_share(summaries: dict, title: str = "How curved are the links between sensors? Bars = plausible range"):
     """One row per dataset: average curved share with its 90% interval."""
     names = list(summaries)[::-1]
     fig, ax = plt.subplots(figsize=(7.2, 0.6 * len(names) + 1.5))
@@ -303,6 +303,6 @@ def curved_share(summaries: dict):
     ax.xaxis.set_major_formatter(lambda v, _: f"{v:+.0%}")
     ax.set_xlabel("extra share of sensor movement explained by curves (0 = links are straight)")
     ax.grid(axis="x", color=GRID, lw=0.6)
-    ax.set_title("How curved are the links between sensors? Bars = plausible range")
+    ax.set_title(title)
     fig.tight_layout()
     return fig

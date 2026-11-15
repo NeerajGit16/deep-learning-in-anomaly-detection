@@ -42,3 +42,20 @@ def linked_sensors(n: int = 2000, d: int = 8, curve: float = 0.0, noise: float =
             signal = (1 - curve) * straight + curve * _curved(f, j)
         X[:, j] = signal / max(signal.std(), 1e-9) + noise * rng.normal(size=n)
     return X
+
+
+def delayed_sensors(n: int = 3000, delay: int = 3, curve: float = 0.0, noise: float = 0.3, seed: int = 0) -> np.ndarray:
+    """Three sensors with one link that takes `delay` readings to arrive. A check for the lag option.
+
+    Sensor 0 is a driver that changes from reading to reading, so its reading now says nothing
+    about its reading `delay` steps ago. Sensor 1 follows the driver `delay` readings later:
+    as a straight-line copy (curve=0), as a curved function of it (curve=1), or a blend.
+    Sensor 2 is unrelated noise. Looking only at readings taken at the same moment, sensor 1
+    appears unlinked to anything.
+    """
+    rng = np.random.default_rng(seed)
+    driver = rng.normal(size=n)
+    past = np.r_[rng.normal(size=delay), driver[:-delay]] if delay else driver
+    signal = (1 - curve) * past + curve * (past ** 2 - 1) / np.sqrt(2)
+    follower = signal / max(signal.std(), 1e-9) + noise * rng.normal(size=n)
+    return np.c_[driver, follower, rng.normal(size=n)]

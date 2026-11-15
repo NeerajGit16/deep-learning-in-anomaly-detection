@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import progress
 from .metrics import dr_at_far
 
 
@@ -60,7 +61,7 @@ def line_draws(calib: list, far: float, n_boot: int, rng) -> tuple[float, np.nda
 
 def bootstrap_dr(per_method: dict, labels: list, far: float = 0.01, n_boot: int = 1000,
                  seed: int = 0, mode: str = "pooled", clusters: list | None = None,
-                 calib: dict | None = None) -> dict:
+                 calib: dict | None = None, verbose: bool = True, what: str = "resampling") -> dict:
     """Resample runs with replacement and recompute DR@FAR for every method.
 
     The same resampled runs are used for every method, so differences between methods are
@@ -82,7 +83,7 @@ def bootstrap_dr(per_method: dict, labels: list, far: float = 0.01, n_boot: int 
         n_cal = len(next(iter(calib.values())))
         picks = rng.integers(0, n_cal, (n_boot, n_cal))       # the same calibration runs for every method
         draws = {}
-        for m, sc in per_method.items():
+        for m, sc in progress.track(per_method.items(), what, total=len(per_method), verbose=verbose):
             counts = AlarmCounts([s[k] for s, k in zip(sc, masks)])
             lines = [np.quantile(np.concatenate([calib[m][j] for j in row]), 1 - far) for row in picks]
             draws[m] = np.array([counts.above(thr)[idx].sum() / counts.sizes[idx].sum()
@@ -91,7 +92,7 @@ def bootstrap_dr(per_method: dict, labels: list, far: float = 0.01, n_boot: int 
     split = {m: ([s[~k] for s, k in zip(sc, masks)], [s[k] for s, k in zip(sc, masks)])
              for m, sc in per_method.items()}
     draws = {m: np.empty(n_boot) for m in per_method}
-    for b, idx in enumerate(idx_all):
+    for b, idx in enumerate(progress.track(idx_all, what, verbose=verbose)):
         for m, (normals, anomalies) in split.items():
             draws[m][b] = _resampled_dr(normals, anomalies, idx, far)
     return draws

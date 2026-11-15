@@ -18,6 +18,7 @@ import pandas as pd
 from . import data as D
 from . import detectors as det
 from . import metrics as M
+from . import progress
 from . import stats as S
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,7 +50,7 @@ def _cache_path(ds: str, method: str, seed: int) -> Path:
     return CACHE / f"{ds}__{method}__{tag}__s{seed}.npz"
 
 
-def score_dataset(ds: D.Dataset, method: str, seed: int) -> Path:
+def score_dataset(ds: D.Dataset, method: str, seed: int, verbose: bool = True) -> Path:
     """Fit once per distinct fit array, score every run and held-out normal run, normalise."""
     path = _cache_path(ds.name, method, seed)
     if path.exists():
@@ -68,8 +69,10 @@ def score_dataset(ds: D.Dataset, method: str, seed: int) -> Path:
         model, fit_scores = fitted[key]
         return M.normalise(model.score(run.X), fit_scores)
 
-    runs = [scored(r) for r in ds.runs]
-    val = [scored(r) for r in ds.val_normal] if ds.val_normal else []
+    todo = list(ds.runs) + list(ds.val_normal or [])
+    what = f"scoring {ds.name} / {method}" + (f" / seed {seed}" if det.REGISTRY[method].stochastic else "")
+    done = [scored(r) for r in progress.track(todo, what, verbose=verbose)]
+    runs, val = done[:len(ds.runs)], done[len(ds.runs):]
     CACHE.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         path,
@@ -92,15 +95,17 @@ def _seeds(method: str, n_seeds: int) -> list[int]:
 
 
 def score_all(datasets=("skab", "tep"), methods=None, n_seeds: int = 5, verbose: bool = True):
-    """Score every run of every dataset with every method (cached, so reruns are instant)."""
+    """Score every run of every dataset with every method (cached, so reruns are instant).
+
+    verbose shows progress bars: one over the (dataset, method, seed) jobs still to do, one over
+    the runs of the job in hand. Jobs already in the cache are skipped silently.
+    """
     methods = [m for m in (methods or METHODS) if m in det.available()]
-    for ds in datasets:
-        ds = D.load(ds) if isinstance(ds, str) else ds     # a name, or a Dataset already loaded
-        for m in methods:
-            for seed in _seeds(m, n_seeds):
-                p = score_dataset(ds, m, seed)
-                if verbose:
-                    print(f"{ds.name:5s} {m:15s} seed {seed}: {p.name}", flush=True)
+    datasets = [D.load(ds) if isinstance(ds, str) else ds for ds in datasets]   # names, or Datasets already loaded
+    jobs = [(ds, m, seed) for ds in datasets for m in methods for seed in _seeds(m, n_seeds)
+            if not _cache_path(ds.name, m, seed).exists()]
+    for ds, m, seed in progress.track(jobs, "scoring jobs", verbose=verbose, leave=True):
+        score_dataset(ds, m, seed, verbose=verbose)
 
 
 def calibration_scores(ds: D.Dataset, method: str, seed: int = 0) -> list | None:
@@ -153,7 +158,7 @@ def cmd_score(args):
         for m in methods:
             for seed in _seeds(m, args.seeds):
                 p = score_dataset(ds, m, seed)
-                print(f"{name:5s} {m:15s} seed {seed}: {p.name}", flush=True)
+                print(f"{name:5s} {m:15s} seed {seed}: {p.name}", flush=True)     # the bar shows the runs; this names the file
 
 
 def _label(method: str) -> str:
@@ -162,7 +167,7 @@ def _label(method: str) -> str:
 
 def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int,
                    resample: str | list = "runs", keep: list | None = None,
-                   calibration: str | None = None) -> dict:
+                   calibration: str | None = None, verbose: bool = True) -> dict:
     """Every method's catch rate on a dataset, from its cached scores, with intervals and paired gaps.
 
     resample     what the intervals redraw: "runs" (single runs), "groups" (whole kinds of fault,
@@ -182,7 +187,7 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int,
     mode = calibration or ds.calibration
     summary, by_group, primary, calibs = [], [], {}, {}
     with_vus = M.vus_available()     # the VUS-PR column is left out when TSB-AD is not installed
-    for m in methods:
+    for m in progress.track(methods, f"reading scores of {ds.name}", verbose=verbose):
         seeds = [s for s in _seeds(m, n_seeds) if _cache_path(ds.name, m, s).exists()]
         if not seeds:
             continue
@@ -222,7 +227,8 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int,
         summary.append(row)
 
     calibs = calibs if mode == "matched" else None
-    draws = S.bootstrap_dr(primary, labels, FAR, n_boot, mode=mode, clusters=clusters, calib=calibs)
+    draws = S.bootstrap_dr(primary, labels, FAR, n_boot, mode=mode, clusters=clusters, calib=calibs,
+                           verbose=verbose, what=f"resampling {ds.name}")
     point = S.point_dr(primary, labels, FAR, mode, calibs)
     pairs = S.paired_differences(draws, point)
     for row in summary:
@@ -252,6 +258,7 @@ def report_old_and_new(ds: D.Dataset, methods: list[str] | None = None, n_seeds:
     set on the scored runs' own normal part, which comes before the fault.
     """
     methods = methods or [k for k in METHODS if k in det.available()]
+    progress.note(f"report on {ds.name}, new line then old line, {n_boot} resamples each")
     return {"new": report_dataset(ds, methods, n_seeds, n_boot, **kw),
             "old": report_dataset(ds, methods, n_seeds, n_boot, calibration="pooled", **kw)}
 
@@ -273,7 +280,7 @@ def old_and_new_table(pair: dict, digits: int = 2) -> pd.DataFrame:
 
 
 def late_false_alarms(ds: D.Dataset, methods: list[str] | None = None, far: float = FAR,
-                      n_boot: int = 1000, seed: int = 0) -> pd.DataFrame:
+                      n_boot: int = 1000, seed: int = 0, verbose: bool = True) -> pd.DataFrame:
     """What the OLD alarm line lets through later in a run, when nothing is wrong.
 
     The old line ("pooled" calibration) is set on the scored runs' own normal part, which comes
@@ -298,8 +305,9 @@ def late_false_alarms(ds: D.Dataset, methods: list[str] | None = None, far: floa
             return late.above(thr)[cal].sum() / late.sizes[cal].sum()
 
         point = rate(np.arange(len(scores)), np.arange(len(late.sizes)))
-        draws = np.array([rate(idx, cal)
-                          for idx, cal in zip(S.resample_indices(len(scores), n_boot, rng, clusters), picks)])
+        pairs = list(zip(S.resample_indices(len(scores), n_boot, rng, clusters), picks))
+        draws = np.array([rate(idx, cal) for idx, cal in
+                          progress.track(pairs, f"resampling late false alarms / {m}", verbose=verbose)])
         lo, hi = S.interval(draws)
         rows[_label(m)] = {"false alarms later, old line": point, "low": lo, "high": hi}
     out = pd.DataFrame(rows).T
@@ -307,7 +315,8 @@ def late_false_alarms(ds: D.Dataset, methods: list[str] | None = None, far: floa
     return out
 
 
-def _twin_draws(ds: D.Dataset, twins: D.Dataset, method: str, far: float, n_boot: int, seed: int) -> dict:
+def _twin_draws(ds: D.Dataset, twins: D.Dataset, method: str, far: float, n_boot: int, seed: int,
+                verbose: bool = True) -> dict:
     """Alarm rates of every fault run and its twin at the matched alarm line, point values and resamples."""
     faulty = S.AlarmCounts([s[np.asarray(r.y, bool)] for s, r in zip(load_scores(ds.name, method, 0)[0], ds.runs)])
     twin = S.AlarmCounts([s[np.asarray(r.y, bool)] for s, r in zip(load_scores(twins.name, method, 0)[0], twins.runs)])
@@ -326,14 +335,15 @@ def _twin_draws(ds: D.Dataset, twins: D.Dataset, method: str, far: float, n_boot
         return in_fault.mean(1), in_twin.mean(), (in_fault - in_twin).mean(1)
 
     point = at(line, np.arange(len(numbers)))
-    draws = [at(thr, cols) for thr, cols in zip(lines, number_picks)]
+    draws = [at(thr, cols) for thr, cols in
+             progress.track(list(zip(lines, number_picks)), f"resampling twins / {method}", verbose=verbose)]
     return {"faults": faults, "point": point, "fault_picks": fault_picks,
             "caught": np.array([d[0] for d in draws]), "twin": np.array([d[1] for d in draws]),
             "excess": np.array([d[2] for d in draws])}
 
 
 def excess_over_twin(ds: D.Dataset, twins: D.Dataset, method: str, far: float = FAR,
-                     n_boot: int = 1000, seed: int = 0) -> pd.DataFrame:
+                     n_boot: int = 1000, seed: int = 0, verbose: bool = True) -> pd.DataFrame:
     """One detector, fault by fault: its alarms in the fault runs minus its alarms in their twins.
 
     `twins` holds the same runs with no fault (matched by meta["run"]). For each fault run, the
@@ -344,7 +354,7 @@ def excess_over_twin(ds: D.Dataset, twins: D.Dataset, method: str, far: float = 
     Ranges redraw the run numbers (a drawn number brings its run of every fault and its twin)
     and the fault-free runs that set the alarm line.
     """
-    d = _twin_draws(ds, twins, method, far, n_boot, seed)
+    d = _twin_draws(ds, twins, method, far, n_boot, seed, verbose)
     caught, twin, excess = d["point"]
     rows = {}
     for j, f in enumerate(d["faults"]):
@@ -357,7 +367,7 @@ def excess_over_twin(ds: D.Dataset, twins: D.Dataset, method: str, far: float = 
 
 
 def excess_summary(ds: D.Dataset, twins: D.Dataset, methods: list[str] | None = None, far: float = FAR,
-                   n_boot: int = 1000, seed: int = 0) -> pd.DataFrame:
+                   n_boot: int = 1000, seed: int = 0, verbose: bool = True) -> pd.DataFrame:
     """Per detector, over all faults: excess alarms over the twin, and the alarms in the twins themselves.
 
     The twins are fault-free, so a well-set alarm line gives about `far` alarms in them.
@@ -365,7 +375,7 @@ def excess_summary(ds: D.Dataset, twins: D.Dataset, methods: list[str] | None = 
     """
     rows = {}
     for m in (methods or [k for k in METHODS if k in det.available()]):
-        d = _twin_draws(ds, twins, m, far, n_boot, seed)
+        d = _twin_draws(ds, twins, m, far, n_boot, seed, verbose)
         caught, twin, excess = d["point"]
         overall = np.array([e[p].mean() for e, p in zip(d["excess"], d["fault_picks"])])
         lo, hi = S.interval(overall)
