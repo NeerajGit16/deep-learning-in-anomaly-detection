@@ -123,3 +123,63 @@ def test_rieth_runs_are_fresh():
     first_hours = {r.name: r.X[2:160].tobytes() for r in ds.runs[:50] + ds.calibration_runs()}
     assert len(set(first_hours.values())) == 100
     assert not any(x[2:160].tobytes() in set(first_hours.values()) for x in fit_runs)
+
+
+# ---------------------------------------------------------------- Cranfield flow rig
+
+def _flows(spec, noise=0.0, seed=0):
+    """Made-up readings with only the air (column 8) and water (column 9) flows filled in."""
+    rng = np.random.default_rng(seed)
+    air = np.concatenate([np.full(n, a) for a, w, n in spec])
+    water = np.concatenate([np.full(n, w) for a, w, n in spec])
+    X = np.zeros((len(air), 23))
+    X[:, 7] = air + noise * 0.0003 * rng.normal(size=len(air))
+    X[:, 8] = water + noise * 0.01 * rng.normal(size=len(air))
+    return X
+
+
+def test_flow_settings_names_each_stretch_and_marks_changes_as_between():
+    X = _flows([(0.0208, 0.5, 300), (0.0300, 0.5, 100), (0.0417, 2.0, 300), (0.0417, 6.0, 20), (0.0417, 3.5, 200)], noise=1.0)
+    label = D.flow_settings(X)
+    names = [D.setting_name(label[a]) for a, b in D.stretches(label)]
+    assert names == ["air 0.0208, water 0.5", "between settings", "air 0.0417, water 2", "between settings",
+                     "air 0.0417, water 3.5"]            # 0.0300 is no setting; 20 readings at one is too short
+    assert (label[:290] == 0).all() and (label[420:690] == 3 * 5 + 2).all()
+
+
+def test_cranfield_labels_cover_the_published_spans_counted_from_one():
+    y = D.cranfield_labels(10, [(3, 5), (9, 10)])
+    assert y.tolist() == [0, 0, 1, 1, 1, 0, 0, 0, 1, 1]
+
+
+needs_cranfield = pytest.mark.skipif(not (D.RAW.joinpath(*D.CRANFIELD_DIR) / "Training.mat").exists(),
+                                     reason="needs the Cranfield files under data/raw/cranfield")
+
+
+@needs_cranfield
+def test_cranfield_shapes():
+    ds = D.load("cranfield")
+    assert len(ds.runs) == 16 and len(ds.channels) == 23 and ds.sample_seconds == 1.0
+    assert {r.X.shape[1] for r in ds.runs} == {23} and ds.runs[0].fit.shape == (9825 + 13200, 23)
+    assert [r.name for r in ds.val_normal] == ["T1"] and ds.calibration == "matched" and ds.matched_start == 0
+    assert all(0 < r.y.mean() < 1 for r in ds.runs)                      # every run has normal and faulty readings
+    assert len({r.group for r in ds.runs}) == 6
+    normal = D.cranfield_normal(columns=24)
+    assert all(np.ptp(X[:, 23]) < 0.002 for X in normal.values())        # column 24 does not move in normal running
+
+
+@needs_cranfield
+def test_cranfield_published_fault_times_agree_with_the_recorded_fault_traces():
+    t = D.cranfield_fault_times_check()
+    gap = (t["published start"] - t["trace first moves"]).abs()
+    assert gap.drop("2_1").max() <= 1          # the fault trace starts moving at the published start
+    assert gap["2_1"] == 156                   # the one exception: published 2244, trace moves at 2400
+    back = t["trace back to start value"].dropna()
+    assert (t.loc[back.index, "published end"] - back).abs().max() <= 1
+
+
+@needs_cranfield
+def test_cranfield_normal_runs_each_pass_through_the_flow_settings():
+    for X in D.cranfield_normal().values():
+        label = D.flow_settings(X)
+        assert len(set(label) - {D.BETWEEN}) >= 19 and 0.05 < (label == D.BETWEEN).mean() < 0.2

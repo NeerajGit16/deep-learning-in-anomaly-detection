@@ -288,13 +288,21 @@ def dial_check(df: pd.DataFrame):
     return fig
 
 
-def curved_share(summaries: dict, title: str = "How curved are the links between sensors? Bars = plausible range"):
-    """One row per dataset: average curved share with its 90% interval."""
+def curved_share(summaries: dict, title: str = "How curved are the links between sensors? Bars = plausible range",
+                 low: str = "curved_low", high: str = "curved_high", mark: float | None = None):
+    """One row per dataset: average curved share with its 90% interval.
+
+    low, high   which range to draw (e.g. "curved_low_units" for the range from resampling visits)
+    mark        draw a second dashed line at this value (e.g. 0.03, the go/no-go mark)
+    """
     names = list(summaries)[::-1]
     fig, ax = plt.subplots(figsize=(7.2, 0.6 * len(names) + 1.5))
+    if mark is not None:
+        ax.axvline(mark, color=ORANGE, lw=1, ls=(0, (3, 3)))
+        ax.text(mark, len(names) - 0.35, f" {mark:+.0%} mark", color=ORANGE, fontsize=8, va="top")
     for i, n in enumerate(names):
         s = summaries[n]
-        ax.hlines(i, s["curved_low"], s["curved_high"], color=BLUE, lw=2)
+        ax.hlines(i, s[low], s[high], color=BLUE, lw=2)
         ax.plot(s["curved"], i, "o", color=BLUE, ms=7, mec=BG, mew=1.5)
         ax.text(s["curved"], i + 0.25, f"{s['curved']:+.1%}", ha="center", fontsize=8, color=INK)
     ax.axvline(0, color=INK2, lw=1, ls=(0, (3, 3)))
@@ -306,3 +314,98 @@ def curved_share(summaries: dict, title: str = "How curved are the links between
     ax.set_title(title)
     fig.tight_layout()
     return fig
+
+
+# ---------------------------------------------------------------- Cranfield flow rig
+
+def flows_over_time(normal: dict, labels: dict | None = None):
+    """One panel per normal run: the water flow (blue, left) and the air flow (orange, right) over the run."""
+    fig, axes = plt.subplots(len(normal), 1, figsize=(9, 1.7 * len(normal) + 0.6), sharex=True)
+    for ax, (name, X) in zip(np.atleast_1d(axes), normal.items()):
+        minutes = np.arange(len(X)) / 60
+        ax.plot(minutes, X[:, 8], color=BLUE, lw=0.8)
+        ax.set_ylabel(f"{name}: water, kg/s", color=BLUE)
+        ax.set_ylim(0, 7)
+        right = ax.twinx()
+        right.plot(minutes, X[:, 7], color=ORANGE, lw=0.8)
+        right.set_ylabel("air, Sm3/s", color=ORANGE)
+        right.set_ylim(0.015, 0.047)
+        right.spines["top"].set_visible(False)
+        ax.grid(axis="y", color=GRID, lw=0.6)
+    np.atleast_1d(axes)[-1].set_xlabel("minutes into the run")
+    np.atleast_1d(axes)[0].set_title("Normal running: each run steps through the rig's flow settings")
+    fig.tight_layout()
+    return fig
+
+
+def curved_by_sensor(table: pd.DataFrame, title: str, low: str = "curved, low (visits)",
+                     high: str = "curved, high (visits)", mark: float | None = 0.10):
+    """One row per sensor: its curved share with a range, most curved at the top."""
+    t = table.sort_values("curved")
+    fig, ax = plt.subplots(figsize=(7.6, 0.27 * len(t) + 1.4))
+    y = np.arange(len(t))
+    ax.hlines(y, t[low], t[high], color=BLUE, lw=2)
+    ax.plot(t["curved"], y, "o", color=BLUE, ms=5, mec=BG, mew=1)
+    ax.axvline(0, color=INK2, lw=1, ls=(0, (3, 3)))
+    if mark is not None:
+        ax.axvline(mark, color=ORANGE, lw=1, ls=(0, (3, 3)))
+        ax.text(mark, len(t) - 0.4, f" {mark:+.0%}", color=ORANGE, fontsize=8, va="top")
+    labels = [f"{w} ({s})" for s, w in zip(t.index, t["what it measures"])] if "what it measures" in t else list(t.index)
+    ax.set_yticks(y, labels, fontsize=8)
+    ax.xaxis.set_major_formatter(lambda v, _: f"{v:+.0%}")
+    ax.set_xlabel("extra share of the sensor's movement explained by curves")
+    ax.grid(axis="x", color=GRID, lw=0.6)
+    ax.set_title(title)
+    fig.tight_layout()
+    return fig
+
+
+def cva_check(result: dict, title: str):
+    """The authors' two monitoring numbers over one faulty run, with their limits and the published fault shaded."""
+    fig, axes = plt.subplots(2, 1, figsize=(8, 4.6), sharex=True)
+    x = np.arange(len(result["T2"])) + result["first"] + 1
+    for ax, key in zip(axes, ("T2", "SPE")):
+        for a, b in result["spans"]:
+            ax.axvspan(a, b, color=FAULT_TINT, lw=0, zorder=0)
+        ax.semilogy(x, result[key], color=BLUE, lw=0.8)
+        ax.axhline(result[f"{key}_limit"], color=ORANGE, lw=1.5, ls=(0, (4, 2)))
+        ax.set_ylabel(key)
+    axes[-1].set_xlabel("reading number (shaded: the published fault)")
+    axes[0].set_title(title)
+    fig.tight_layout()
+    return fig
+
+
+def scatter_by_setting(X: np.ndarray, label: np.ndarray, pairs: list, names: list, air: tuple, water: tuple,
+                       every: int = 5, between: int = -1, describe: dict | None = None):
+    """One row per (sensor, its best single predictor): the same scatter twice, coloured by the
+    water flow setting (left) and by the air flow setting (right). Readings taken between
+    settings are grey.
+
+    If the points of every setting fall along one bent line, the link is a real curve. If each
+    setting sits in its own cluster, off any common line, the "curve" is level shifts between settings.
+    """
+    describe = describe or {}
+    keep = np.arange(0, len(X), every)
+    lab = np.asarray(label)[keep]
+    at = lab != between
+    fig, axes = plt.subplots(len(pairs), 2, figsize=(10, 3.3 * len(pairs)), squeeze=False)
+    water_colours = [SEQ(v) for v in np.linspace(0.25, 1.0, len(water))]
+    air_colours = ["#f6c9a0", "#eb9a5a", "#d9601f", "#8f3a0c"][:len(air)]
+    for row, (target, partner) in zip(axes, pairs):
+        x, y = X[keep, names.index(partner)], X[keep, names.index(target)]
+        for ax, colours, levels, index, what in ((row[0], water_colours, water, lab % len(water), "water flow, kg/s"),
+                                                 (row[1], air_colours, air, lab // len(water), "air flow, Sm3/s")):
+            ax.scatter(x[~at], y[~at], s=3, color="#c9c8c3", lw=0, label="between settings")
+            for k, level in enumerate(levels):
+                pick = at & (index == k)
+                ax.scatter(x[pick], y[pick], s=3, color=colours[k], lw=0, label=f"{level:g}")
+            ax.set_xlabel(describe.get(partner, partner))
+            ax.set_ylabel(target)
+            ax.grid(color=GRID, lw=0.6)
+            ax.legend(title=what, fontsize=7, title_fontsize=7, markerscale=3, frameon=False, loc="best")
+        row[0].set_title(f"{describe.get(target, target)}: coloured by water flow")
+        row[1].set_title("the same points, coloured by air flow")
+    fig.tight_layout()
+    return fig
+

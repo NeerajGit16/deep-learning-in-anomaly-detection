@@ -104,6 +104,8 @@ def score_all(datasets=("skab", "tep"), methods=None, n_seeds: int = 5, verbose:
     datasets = [D.load(ds) if isinstance(ds, str) else ds for ds in datasets]   # names, or Datasets already loaded
     jobs = [(ds, m, seed) for ds in datasets for m in methods for seed in _seeds(m, n_seeds)
             if not _cache_path(ds.name, m, seed).exists()]
+    if not jobs:          # everything is already in the cache: nothing to show
+        return
     for ds, m, seed in progress.track(jobs, "scoring jobs", verbose=verbose, leave=True):
         score_dataset(ds, m, seed, verbose=verbose)
 
@@ -213,6 +215,8 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int,
                 # false alarms this line gives on fault-free runs, over the fault's stretch of a run
                 per_seed[-1]["far_late_fault_free"] = float(np.mean(np.concatenate(cal) > p1["threshold"]))
             if mode == "matched":
+                # false alarms this line gives on the scored runs' own normal readings (0.01 if it carries over)
+                per_seed[-1]["far_own_normal"] = p1["far_first_window"]
                 # for comparison: the catch rate under the older rule (line set on the runs' own first part)
                 per_seed[-1]["dr_old_rule"] = M.dr_at_far(runs, labels, FAR, "pooled")["dr"]
             if seed == seeds[0]:
@@ -276,6 +280,69 @@ def old_and_new_table(pair: dict, digits: int = 2) -> pd.DataFrame:
     out["false alarms later, old line"] = old["far_late_fault_free"].round(3)
     out = out.loc[new.sort_values("dr_at_1pct", ascending=False).index]
     out.index.name = "detector"
+    return out
+
+
+def report_two_lines(ds: D.Dataset, other: str = "per_run", methods: list[str] | None = None, n_seeds: int = 5,
+                     n_boot: int = 1000, **kw) -> dict:
+    """report_dataset under the dataset's own alarm line ("main") and under another way of setting it ("other")."""
+    methods = methods or [k for k in METHODS if k in det.available()]
+    progress.note(f"report on {ds.name}: its own alarm line, then '{other}', {n_boot} resamples each")
+    return {"main": report_dataset(ds, methods, n_seeds, n_boot, **kw),
+            "other": report_dataset(ds, methods, n_seeds, n_boot, calibration=other, **kw)}
+
+
+def two_lines_table(pair: dict, digits: int = 2) -> pd.DataFrame:
+    """Per detector: catch rate (with range) under both alarm lines, from report_two_lines.
+
+    "false alarms on the runs' own normal readings" is the share of the scored runs' normal
+    readings that cross the main line. It is about 0.01 if a line set on separate normal data
+    carries over to the scored runs; far more means their normal readings look different to
+    the detector, and the catch rate under that line is then not a fair "1 false alarm in 100".
+    """
+    main = pd.DataFrame(pair["main"]["summary"]).set_index("method")
+    out = pd.DataFrame({"caught, line from separate normal data": rates(pair["main"], digits)})
+    if "far_own_normal" in main:
+        out["false alarms on the runs' own normal readings"] = main["far_own_normal"].round(3)
+    out["caught, each run's own line"] = rates(pair["other"], digits)
+    out = out.loc[main.sort_values("dr_at_1pct", ascending=False).index]
+    out.index.name = "detector"
+    return out
+
+
+def false_alarms_around_fault(ds: D.Dataset, methods: list[str] | None = None, far: float = FAR) -> pd.DataFrame:
+    """Where a matched alarm line's false alarms fall in the scored runs: before the fault, or after it has started.
+
+    For datasets whose runs have normal readings both before a fault and after it is removed.
+    "before" is every reading ahead of a run's first fault reading; "after" is the normal
+    readings that come later (once the fault has been removed, or between two faults). If the
+    line carries over from the separate normal data, both are about `far`. A high "before" says
+    the runs' normal readings look different to the detector from the day it was fitted on; a
+    high "after" with a low "before" says the system has not settled back.
+    """
+    rows = {}
+    for m in methods or [k for k in METHODS if k in det.available()]:
+        scores = load_scores(ds.name, m, 0)[0]
+        thr = M.dr_at_far(scores, [r.y for r in ds.runs], far, "matched", calibration_scores(ds, m, 0))["threshold"]
+        before, after = [], []
+        for s, r in zip(scores, ds.runs):
+            first = int(np.flatnonzero(r.y)[0])
+            before.append(s[:first] > thr)
+            after.append(s[first:][r.y[first:] == 0] > thr)
+        rows[_label(m)] = {"false alarms before the fault": float(np.concatenate(before).mean()),
+                           "false alarms after the fault": float(np.concatenate(after).mean()),
+                           "runs with over 0.05 before the fault": int(sum(b.mean() > 0.05 for b in before)),
+                           "runs": len(scores)}
+    out = pd.DataFrame(rows).T.astype({"runs with over 0.05 before the fault": int, "runs": int})
+    out.index.name = "detector"
+    return out
+
+
+def fault_table(res: dict, digits: int = 2) -> pd.DataFrame:
+    """Catch rate of every detector (columns, best first) on every kind of fault (rows), from report_dataset."""
+    order = pd.DataFrame(res["summary"]).sort_values("dr_at_1pct", ascending=False)["method"].tolist()
+    out = pd.DataFrame(res["by_group"]).pivot(index="group", columns="method", values="dr_at_1pct")[order].round(digits)
+    out.index.name, out.columns.name = "kind of fault", None
     return out
 
 

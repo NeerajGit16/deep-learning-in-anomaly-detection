@@ -387,6 +387,208 @@ def load_tep_rieth_control(raw: Path = RAW, runs: int = 50, fit_runs: int = 20, 
     return out
 
 
+# ---------------------------------------------------------------- Cranfield multiphase flow rig
+#
+# Ruiz-Carcel, Cao, Mba, Lao, Samuel (2015), "Statistical process monitoring of a multiphase flow
+# facility", Control Engineering Practice 42, 74-88. Data and the authors' example code: the
+# "cvatutor" package (MATLAB File Exchange 50938, version 1.1.0), unpacked by hand under
+# data/raw/cranfield/. A rig that pumps air and water up a riser into separators; 24 columns,
+# one reading a second.
+#
+# Where the facts below come from: the paper (author version from Cranfield's repository).
+#   - one reading a second: section 2.1, "all the data was captured at a sampling rate of 1 Hz";
+#   - the sensor list: its Table 1, in the order of the columns;
+#   - the flow settings: its Table 2;
+#   - fault start and end of every run: its Tables 4 to 9.
+# The times were also checked against the EvoFault columns of the data
+# (cranfield_fault_times_check). They agree to within a reading or two, except run 2.1: the
+# paper gives its start as 2244, the recorded valve trace first moves at 2400. The paper's
+# time is used.
+
+CRANFIELD_DIR = ("cranfield", "cvatutor-1.1.0", "CVACaseStudy")
+
+CRANFIELD_INFO = pd.DataFrame([
+    (1, "PT312", "Air supply pressure", "MPa"),
+    (2, "PT401", "Pressure at the bottom of the riser", "MPa"),
+    (3, "PT408", "Pressure at the top of the riser", "MPa"),
+    (4, "PT403", "Pressure in the top separator", "MPa"),
+    (5, "PT501", "Pressure in the three-phase separator", "MPa"),
+    (6, "PT408 diff", "Pressure drop along the riser (bottom minus top)", "MPa"),
+    (7, "PT403 diff", "Pressure drop across valve VC404", "MPa"),
+    (8, "FT305", "Air flow into the rig", "Sm3/s"),
+    (9, "FT104", "Water flow into the rig", "kg/s"),
+    (10, "FT407 flow", "Flow at the top of the riser", "kg/s"),
+    (11, "LI405", "Level in the top separator", "m"),
+    (12, "FT406 flow", "Flow out of the top separator", "kg/s"),
+    (13, "FT407 density", "Density at the top of the riser", "kg/m3"),
+    (14, "FT406 density", "Density out of the top separator", "kg/m3"),
+    (15, "FT104 density", "Density of the water going in", "kg/m3"),
+    (16, "FT407 temp", "Temperature at the top of the riser", "deg C"),
+    (17, "FT406 temp", "Temperature out of the top separator", "deg C"),
+    (18, "FT104 temp", "Temperature of the water going in", "deg C"),
+    (19, "LI504", "Gas-liquid level in the three-phase separator", "%"),
+    (20, "VC501", "Position of valve VC501", "%"),
+    (21, "VC302", "Position of valve VC302", "%"),
+    (22, "VC101", "Position of valve VC101", "%"),
+    (23, "PO1", "Electric current drawn by the water pump", "amps"),
+    (24, "PT417", "Pressure in the mixing zone of the 2-inch line", "MPa"),
+], columns=["column", "sensor", "what it measures", "unit"])
+
+# Column 24 belongs to a second, 2-inch riser line that is shut off in normal running: in the
+# three normal runs it never moves (it sits at one value per day). The paper uses columns 1-23
+# for training and for fault cases 1-5, and adds column 24 only for fault case 6, which is that
+# line being pressurised ("this fault should not affect the flow conditions in the 4-inch line
+# or other parts of the rig"). We use columns 1-23 throughout, so fault 6 is close to invisible
+# here by design; including column 24 would hand that fault to every detector.
+CRANFIELD_CHANNELS = list(CRANFIELD_INFO["sensor"][:23])
+
+CRANFIELD_FAULTS = {1: "Air line blockage", 2: "Water line blockage", 3: "Top separator input blockage",
+                    4: "Open direct bypass", 5: "Slugging conditions", 6: "Pressurisation of the 2-inch line"}
+
+# Fault start and end, as reading numbers counted from 1 as in the paper (both ends included),
+# and whether the flow settings were being changed during the run.
+CRANFIELD_TIMES = {
+    "1_1": ("changing", [(1566, 5181)]), "1_2": ("steady", [(657, 3777)]), "1_3": ("steady", [(691, 3691)]),
+    "2_1": ("changing", [(2244, 6616)]), "2_2": ("steady", [(476, 2656)]), "2_3": ("steady", [(331, 2467)]),
+    "3_1": ("changing", [(1136, 8352)]), "3_2": ("steady", [(333, 5871)]), "3_3": ("steady", [(596, 9566)]),
+    "4_1": ("changing", [(953, 6294)]), "4_2": ("steady", [(851, 3851)]), "4_3": ("steady", [(241, 3241)]),
+    "5_1": ("changing", [(686, 1172), (1772, 2253)]),
+    "5_2": ("changing", [(1633, 2955), (7031, 7553), (8057, 10608)]),
+    "6_1": ("changing", [(1723, 2800)]), "6_2": ("changing", [(1037, 4830)]),
+}
+
+# The flow settings the rig was run at (from the paper's description; they are also plain to
+# see in the data): every pairing of these air and water flows.
+CRANFIELD_AIR = (0.0208, 0.0278, 0.0347, 0.0417)      # Sm3/s
+CRANFIELD_WATER = (0.5, 1.0, 2.0, 3.5, 6.0)           # kg/s
+BETWEEN = -1                                          # label of a reading taken while a flow is being changed
+
+
+def _cranfield_mat(name: str, raw: Path) -> dict:
+    from scipy.io import loadmat
+    path = raw.joinpath(*CRANFIELD_DIR) / f"{name}.mat"
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found: unpack the cvatutor package (MATLAB File Exchange 50938) "
+                                f"under {raw / 'cranfield'}")
+    return {k: np.asarray(v, float) for k, v in loadmat(path).items() if not k.startswith("__")}
+
+
+def cranfield_normal(raw: Path = RAW, columns: int = 23) -> dict:
+    """The three normal runs, {"T1": readings, "T2": ..., "T3": ...}, first `columns` columns."""
+    return {k: v[:, :columns] for k, v in sorted(_cranfield_mat("Training", raw).items())}
+
+
+def cranfield_faulty(raw: Path = RAW, columns: int = 23) -> dict:
+    """The 16 faulty runs: {"1_1": (readings, fault trace as recorded in the EvoFault column), ...}."""
+    out = {}
+    for case in CRANFIELD_FAULTS:
+        m = _cranfield_mat(f"FaultyCase{case}", raw)
+        for key in sorted(k for k in m if k.startswith("Set")):
+            out[key[3:]] = (m[key][:, :columns], m[f"EvoFault{key[3:]}"].ravel())
+    return out
+
+
+def cranfield_labels(n: int, spans: list) -> np.ndarray:
+    """1 for every reading inside a published fault span (numbered from 1, both ends included)."""
+    y = np.zeros(n, int)
+    for start, end in spans:
+        y[start - 1: end] = 1
+    return y
+
+
+def cranfield_fault_times_check(raw: Path = RAW) -> pd.DataFrame:
+    """Published fault times next to what the EvoFault column of each run shows.
+
+    EvoFault records how far the fault was applied (a valve position in cases 1-4, on/off in
+    cases 5 and 6). "trace first moves" is the first reading where it leaves its starting
+    value; "trace back to start value" the first reading afterwards where it is back, if ever.
+    """
+    rows = []
+    for name, (X, trace) in cranfield_faulty(raw).items():
+        moved = np.flatnonzero(trace != trace[0])
+        after = np.flatnonzero(trace[moved[-1]:] == trace[0]) if len(moved) else []
+        condition, spans = CRANFIELD_TIMES[name]
+        rows.append({"run": name, "fault": CRANFIELD_FAULTS[int(name[0])], "flow settings": condition,
+                     "readings": len(X), "published start": spans[0][0], "published end": spans[-1][1],
+                     "trace first moves": int(moved[0]) + 1 if len(moved) else None,
+                     "trace back to start value": int(moved[-1] + after[0]) + 1 if len(after) else None,
+                     "fault spans": len(spans),
+                     "share of run labelled fault": cranfield_labels(len(X), spans).mean()})
+    return pd.DataFrame(rows).set_index("run")
+
+
+def flow_settings(X: np.ndarray, window: int = 31, shortest: int = 60) -> np.ndarray:
+    """Which flow setting each reading was taken at: one whole number per reading.
+
+    The air flow (column 8) and water flow (column 9) are smoothed with a running median over
+    `window` readings, then matched to the nearest of the rig's settings (CRANFIELD_AIR,
+    CRANFIELD_WATER). A reading counts as "at" a setting when both flows are close to it (air
+    within 0.0015 Sm3/s, water within 8% plus 0.03 kg/s). Everything else, and any stretch at a
+    setting shorter than `shortest` readings, is labelled BETWEEN (-1): a flow is being changed.
+    Settings are numbered air-index * 5 + water-index; setting_name() turns that into words.
+    """
+    air = pd.Series(X[:, 7]).rolling(window, center=True, min_periods=1).median().to_numpy()
+    water = pd.Series(X[:, 8]).rolling(window, center=True, min_periods=1).median().to_numpy()
+    A, W = np.array(CRANFIELD_AIR), np.array(CRANFIELD_WATER)
+    ia, iw = np.abs(air[:, None] - A).argmin(1), np.abs(water[:, None] - W).argmin(1)
+    steady = (np.abs(air - A[ia]) <= 0.0015) & (np.abs(water - W[iw]) <= 0.08 * W[iw] + 0.03)
+    label = np.where(steady, ia * len(W) + iw, BETWEEN)
+    for start, end in stretches(label):
+        if label[start] != BETWEEN and end - start < shortest:
+            label[start:end] = BETWEEN
+    return label
+
+
+def stretches(label: np.ndarray) -> list[tuple[int, int]]:
+    """(start, end) of every unbroken stretch of one label; end is one past the last reading."""
+    cuts = np.r_[0, np.flatnonzero(np.diff(label) != 0) + 1, len(label)]
+    return [(int(a), int(b)) for a, b in zip(cuts[:-1], cuts[1:])]
+
+
+def setting_name(code: int) -> str:
+    if code == BETWEEN:
+        return "between settings"
+    return f"air {CRANFIELD_AIR[code // len(CRANFIELD_WATER)]:.4f}, water {CRANFIELD_WATER[code % len(CRANFIELD_WATER)]:g}"
+
+
+def cranfield_settings_table(raw: Path = RAW) -> pd.DataFrame:
+    """Minutes each normal run spends at each flow setting (rows: air flow; columns: water flow, per run)."""
+    rows = {}
+    for run, X in cranfield_normal(raw).items():
+        label = flow_settings(X)
+        for code in range(len(CRANFIELD_AIR) * len(CRANFIELD_WATER)):
+            a, w = divmod(code, len(CRANFIELD_WATER))
+            rows[(f"water {CRANFIELD_WATER[w]:g} kg/s", run)] = rows.get((f"water {CRANFIELD_WATER[w]:g} kg/s", run), {})
+            rows[(f"water {CRANFIELD_WATER[w]:g} kg/s", run)][f"air {CRANFIELD_AIR[a]:.4f} Sm3/s"] = (label == code).sum() / 60
+    out = pd.DataFrame(rows).round(1)
+    out.columns.names = ["water flow", "run"]
+    return out
+
+
+def load_cranfield(raw: Path = RAW, fit: tuple = ("T2", "T3"), calibrate: tuple = ("T1",)) -> Dataset:
+    """Cranfield flow rig: 16 faulty runs, 23 sensors, one reading a second.
+
+    Detectors are fitted on normal runs T2 and T3 joined end to end (the authors' example
+    trains on the same two). The alarm line comes from normal run T1, which the detectors
+    never see: one run, so the line rests on a single recording. Fault labels are the
+    published start and end of each fault (CRANFIELD_TIMES); most faults are applied step by
+    step, so the first part of a labelled fault is mild.
+    """
+    normal = cranfield_normal(raw)
+    fit_data = np.vstack([normal[k] for k in fit])
+    runs = []
+    for name, (X, trace) in cranfield_faulty(raw).items():
+        condition, spans = CRANFIELD_TIMES[name]
+        case = int(name[0])
+        runs.append(Run(f"set{name}", X, cranfield_labels(len(X), spans), fit_data,
+                        group=f"{case} {CRANFIELD_FAULTS[case]}",
+                        meta={"fault": case, "flow settings": condition, "spans": spans, "trace": trace}))
+    val = [Run(k, normal[k], np.zeros(len(normal[k]), int), fit_data, group="normal") for k in calibrate]
+    name = "cranfield" if (tuple(fit), tuple(calibrate)) == (("T2", "T3"), ("T1",)) \
+        else f"cranfield_fit{''.join(fit)}_cal{''.join(calibrate)}"
+    return Dataset(name, runs, CRANFIELD_CHANNELS, 1.0, val, calibration="matched", matched_start=0)
+
+
 # ---------------------------------------------------------------- plain-English descriptions
 
 SKAB_INFO = pd.DataFrame([
@@ -459,7 +661,8 @@ def tep_frame(fault: int = 1, raw: Path = RAW) -> pd.DataFrame:
 
 
 LOADERS = {"skab": load_skab, "tep": load_tep, "tep_rieth": load_tep_rieth,
-           "tep_rieth_control": load_tep_rieth_control, "tep_rieth_calibration": load_tep_rieth_calibration}
+           "tep_rieth_control": load_tep_rieth_control, "tep_rieth_calibration": load_tep_rieth_calibration,
+           "cranfield": load_cranfield}
 
 
 def load(name: str, raw: Path = RAW) -> Dataset:

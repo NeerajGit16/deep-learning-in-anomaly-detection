@@ -18,7 +18,7 @@ import pandas as pd
 from . import detectors as det
 from . import metrics as M
 from . import progress
-from .data import Dataset
+from .data import Dataset, stretches
 # The link-residual detector and its models live in detectors.py (next to the registry).
 # They are imported here so structure.LinkResidual and structure.blocked_folds keep working.
 from .detectors import LinkResidual, _flexible, _straight, blocked_folds  # noqa: F401
@@ -40,7 +40,8 @@ def _lagged(Z: np.ndarray, lags: tuple) -> tuple[np.ndarray, np.ndarray]:
 
 
 def held_out_by_run(runs: list, k: int = 5, seed: int = 0, lags: tuple = (), verbose: bool = True,
-                    what: str = "curvature measure") -> dict:
+                    what: str = "curvature measure", folds: list | None = None, modes: list | None = None,
+                    told: str = "levels") -> dict:
     """For every sensor: its held-out prediction from the OTHER sensors, straight and straight+flexible.
 
     runs   list of (readings, sensors) arrays: separate recordings of the same sensors. They are
@@ -54,8 +55,26 @@ def held_out_by_run(runs: list, k: int = 5, seed: int = 0, lags: tuple = (), ver
     training data of every fold. With lags, training readings closer than the longest lag to a
     held-out block of the same run are left out, so no reading is on both sides.
 
+    folds  instead of the k blocks of time: one array per run giving, for every reading, the
+           number of the fold that holds it out (see staggered_folds). No gap is left around
+           held-out stretches then, so with lags a training reading may use, as an input, another
+           sensor's reading from a held-out stretch. The held-out readings of the sensor being
+           predicted are still never seen in training.
+    modes  one array per run giving the operating mode (setting) of every reading, as whole
+           numbers. If given, the straight-line model is "told the mode", in one of two ways,
+           and the flexible model is given the mode as one more input.
+    told   "levels": one straight model with its own level for every mode (the mode enters as
+           one yes/no input per mode) and the same slopes in all modes. Stable even when a mode
+           has little training data.
+           "separate": a straight model of its own for each mode, level and slopes. The stronger
+           form, but it needs enough varied training data in every mode: if a mode's training
+           data is one short steady stretch, its slopes are fitted to noise and can be far off
+           on another day. A held-out reading whose mode is not in the training data falls
+           back on one straight model for all modes.
+
     Returns a dict of arrays over all kept readings: "Z" (standardised targets), "straight" and
-    "both" (predictions), "run" (which run each reading came from). Constant sensors are predicted as 0.
+    "both" (predictions), "run" (which run each reading came from), "position" (where in its run,
+    counted after the first max(lags) readings are dropped). Constant sensors are predicted as 0.
     """
     lags = tuple(lags)
     stacked = np.vstack(runs)
@@ -65,38 +84,112 @@ def held_out_by_run(runs: list, k: int = 5, seed: int = 0, lags: tuple = (), ver
     targets, features, run_id, fold_id = [], [], [], []
     for r, X in enumerate(runs):
         y, F = _lagged((X - mu) / sd, lags)
-        fold = np.empty(len(y), int)
-        for f, idx in enumerate(blocked_folds(len(y), k)):
-            fold[idx] = f
+        if folds is None:
+            fold = np.empty(len(y), int)
+            for f, idx in enumerate(blocked_folds(len(y), k)):
+                fold[idx] = f
+        else:
+            fold = np.asarray(folds[r])[back:]
         targets.append(y), features.append(F), run_id.append(np.full(len(y), r)), fold_id.append(fold)
     Z, F = np.vstack(targets), np.vstack(features)
     run_id, fold_id = np.concatenate(run_id), np.concatenate(fold_id)
     position = np.concatenate([np.arange(len(t)) for t in targets])
+    mode = None if modes is None else np.concatenate([np.asarray(m)[back:] for m in modes])
+    if told not in ("levels", "separate"):
+        raise ValueError("told must be 'levels' or 'separate'")
+    yes_no = None if mode is None else (mode[:, None] == np.unique(mode)[None, :]).astype(float)
+    fold_numbers = range(k) if folds is None else sorted(set(fold_id))
     sensor_of_column = np.tile(np.arange(d), 1 + len(lags))
     lin, both = np.zeros_like(Z), np.zeros_like(Z)
-    steps = progress.track(range(k * int(live.sum())), f"{what} (models fitted)", verbose=verbose)
-    for f in range(k):
+    steps = progress.track(range(len(fold_numbers) * int(live.sum())), f"{what} (models fitted)", verbose=verbose)
+    for f in fold_numbers:
         test = fold_id == f
         if not test.any():
             continue
         train = ~test
-        if back:      # leave a gap of `back` readings around each run's held-out block
+        if back and folds is None:      # leave a gap of `back` readings around each run's held-out block
             for r in np.unique(run_id[test]):
                 held = position[test & (run_id == r)]
                 near = (run_id == r) & (position >= held.min() - back) & (position <= held.max() + back)
                 train &= ~near
         for j in np.flatnonzero(live):
             cols = live[sensor_of_column] & (sensor_of_column != j)
-            A, y = F[train][:, cols], Z[train, j]
-            m1 = _straight().fit(A, y)
-            m2 = _flexible(seed).fit(A, y - m1.predict(A))
-            p = m1.predict(F[test][:, cols])
+            A, y, B = F[train][:, cols], Z[train, j], F[test][:, cols]
+            if mode is None:
+                m1 = _straight().fit(A, y)
+                fitted, p = m1.predict(A), m1.predict(B)
+            elif told == "levels":
+                m1 = _straight().fit(np.c_[A, yes_no[train]], y)
+                fitted, p = m1.predict(np.c_[A, yes_no[train]]), m1.predict(np.c_[B, yes_no[test]])
+            else:
+                fitted, p = _straight_by_mode(A, y, mode[train], B, mode[test])
+            if mode is not None:
+                A, B = np.c_[A, mode[train]], np.c_[B, mode[test]]
+            m2 = _flexible(seed).fit(A, y - fitted)
             lin[test, j] = p
-            both[test, j] = p + m2.predict(F[test][:, cols])
+            both[test, j] = p + m2.predict(B)
             next(steps, None)
     for _ in steps:      # let the bar finish and close
         pass
-    return {"Z": Z, "straight": lin, "both": both, "run": run_id}
+    return {"Z": Z, "straight": lin, "both": both, "run": run_id, "position": position}
+
+
+def _straight_by_mode(A, y, mode, B, mode_b, fewest: int = 30):
+    """A straight-line model per mode. Returns its predictions for the training rows A and the rows B.
+
+    Modes with fewer than `fewest` training rows, and rows of B whose mode is not in the
+    training data, use one straight model fitted on all the training rows.
+    """
+    overall = _straight().fit(A, y)
+    fitted, p = overall.predict(A), overall.predict(B)
+    for m in np.unique(mode):
+        rows = mode == m
+        if rows.sum() < fewest:
+            continue
+        own = _straight().fit(A[rows], y[rows])
+        fitted[rows] = own.predict(A[rows])
+        if (mode_b == m).any():
+            p[mode_b == m] = own.predict(B[mode_b == m])
+    return fitted, p
+
+
+def staggered_folds(labels: list, between: int = -1) -> tuple[list, list]:
+    """Folds that hold out whole stretches at one setting, with every setting kept in training.
+
+    labels   one array per run: the setting of every reading (whole numbers; `between` marks
+             readings taken while the setting is being changed).
+    For runs that each pass through many settings. Every unbroken stretch at one setting is held
+    out whole. There are as many folds as runs, and fold f holds out setting c's stretches in
+    run r when (c + r) leaves remainder f on division by the number of runs. So when a setting
+    is held out in one run, its stretches in the other runs are in the training data, and every
+    run is in the training data of every fold. In-between stretches are dealt round the folds
+    in turn.
+
+    Returns (folds, units): per run, the fold of every reading, and a number for the stretch
+    every reading belongs to (unique across runs), for resampling stretches.
+    """
+    n = len(labels)
+    folds, units, count = [], [], 0
+    for r, label in enumerate(labels):
+        label = np.asarray(label)
+        fold, unit = np.empty(len(label), int), np.empty(len(label), int)
+        for i, (a, b) in enumerate(stretches(label)):
+            fold[a:b] = ((i if label[a] == between else int(label[a])) + r) % n
+            unit[a:b] = count
+            count += 1
+        folds.append(fold), units.append(unit)
+    return folds, units
+
+
+def unseen_share(labels: list, folds: list, between: int = -1) -> float:
+    """Share of held-out readings at a setting that is nowhere in that fold's training data."""
+    label, fold = np.concatenate(labels), np.concatenate(folds)
+    at = label != between
+    unseen = np.zeros(len(label), bool)
+    for f in np.unique(fold):
+        seen = np.unique(label[(fold != f) & at])
+        unseen |= (fold == f) & at & ~np.isin(label, seen)
+    return float(unseen[at].mean())
 
 
 def held_out_predictions(X: np.ndarray, k: int = 5, seed: int = 0, lags: tuple = (), verbose: bool = True):
@@ -152,7 +245,9 @@ def curvature_summary(X: np.ndarray, channels: list[str], k: int = 5, seed: int 
 
 
 def curvature_by_run(runs: list, channels: list[str], k: int = 5, seed: int = 0, n_boot: int = 500,
-                     lags: tuple = (), verbose: bool = True, what: str = "curvature measure") -> dict:
+                     lags: tuple = (), verbose: bool = True, what: str = "curvature measure",
+                     folds: list | None = None, modes: list | None = None, units: list | None = None,
+                     told: str = "levels") -> dict:
     """The curvature measure for several separate runs, with ranges from resampling whole runs.
 
     Same measure as curvature_summary (see held_out_by_run for how readings are held out), and the
@@ -160,40 +255,118 @@ def curvature_by_run(runs: list, channels: list[str], k: int = 5, seed: int = 0,
     "table": its straight share, its curved share and the 90% range of its curved share.
 
     Each resample draws runs with replacement and recomputes every share from the drawn runs'
-    held-out errors (the models are not refitted). With very few runs the ranges are rough.
+    held-out errors (the models are not refitted). With very few runs the ranges are rough: two
+    runs can only be redrawn three ways.
+
+    folds, modes, told   passed on to held_out_by_run.
+    units          one array per run numbering the stretch each reading belongs to (see
+                   staggered_folds). If given, a second set of ranges comes from resampling those
+                   stretches instead of whole runs: "curved_low_units"/"curved_high_units" (and
+                   the same for "straight"), in the summary and per sensor, plus "units".
     """
-    h = held_out_by_run(runs, k, seed, lags, verbose, what)
+    h = held_out_by_run(runs, k, seed, lags, verbose, what, folds, modes, told)
     Z = h["Z"] - h["Z"].mean(0)
-    n_runs = len(runs)
+    sq_lin, sq_both = (h["Z"] - h["straight"]) ** 2, (h["Z"] - h["both"]) ** 2
 
-    def per_run(values):                                   # (runs, sensors): sum over each run's readings
-        out = np.zeros((n_runs, values.shape[1]))
-        np.add.at(out, h["run"], values)
-        return out
+    def ranges(group):
+        """Shares from all readings, and their draws when the groups of readings are resampled."""
+        n = int(group.max()) + 1
 
-    total = per_run(Z ** 2)
-    err_lin, err_both = per_run((h["Z"] - h["straight"]) ** 2), per_run((h["Z"] - h["both"]) ** 2)
+        def per_group(values):                             # (groups, sensors): sum over each group's readings
+            out = np.zeros((n, values.shape[1]))
+            np.add.at(out, group, values)
+            return out
 
-    def shares(idx):
-        t = total[idx].sum(0)
-        t = np.where(t > 0, t, 1.0)
-        return 1 - err_lin[idx].sum(0) / t, (err_lin[idx].sum(0) - err_both[idx].sum(0)) / t
+        total, err_lin, err_both = per_group(Z ** 2), per_group(sq_lin), per_group(sq_both)
+        tiny = 1e-9 * total.sum(0)
 
-    straight, curved = shares(np.arange(n_runs))
-    rng = np.random.default_rng(seed)
-    draws = [shares(idx) for idx in rng.integers(0, n_runs, (n_boot, n_runs))]
-    s_draws, c_draws = np.array([d[0] for d in draws]), np.array([d[1] for d in draws])
+        def shares(idx):
+            t = total[idx].sum(0)
+            moves = t > tiny                               # a sensor that does not move has nothing to explain: 0
+            t = np.where(moves, t, 1.0)
+            return (np.where(moves, 1 - err_lin[idx].sum(0) / t, 0.0),
+                    np.where(moves, (err_lin[idx].sum(0) - err_both[idx].sum(0)) / t, 0.0))
+
+        rng = np.random.default_rng(seed)
+        draws = [shares(idx) for idx in rng.integers(0, n, (n_boot, n))]
+        return shares(np.arange(n)), np.array([d[0] for d in draws]), np.array([d[1] for d in draws])
+
+    (straight, curved), s_draws, c_draws = ranges(h["run"])
     table = pd.DataFrame({"straight": straight, "curved": curved,
                           "curved_low": np.quantile(c_draws, 0.05, axis=0),
                           "curved_high": np.quantile(c_draws, 0.95, axis=0)}, index=channels)
     table.index.name = "sensor"
     lo, hi = np.quantile(c_draws.mean(1), [0.05, 0.95])
     s_lo, s_hi = np.quantile(s_draws.mean(1), [0.05, 0.95])
-    return {"sensors": len(channels), "readings": len(Z), "runs": n_runs,
-            "straight": float(straight.mean()), "straight_low": float(s_lo), "straight_high": float(s_hi),
-            "curved": float(curved.mean()), "curved_low": float(lo), "curved_high": float(hi),
-            "sensors_with_curved_over_5pts": int((curved > 0.05).sum()),
-            "sensors_with_curved_over_10pts": int((curved > 0.10).sum()), "table": table}
+    out = {"sensors": len(channels), "readings": len(Z), "runs": len(runs),
+           "straight": float(straight.mean()), "straight_low": float(s_lo), "straight_high": float(s_hi),
+           "curved": float(curved.mean()), "curved_low": float(lo), "curved_high": float(hi),
+           "sensors_with_curved_over_5pts": int((curved > 0.05).sum()),
+           "sensors_with_curved_over_10pts": int((curved > 0.10).sum()), "table": table}
+    if units is not None:
+        back = max(tuple(lags), default=0)
+        unit = np.unique(np.concatenate([np.asarray(u)[back:] for u in units]), return_inverse=True)[1]
+        _, s_draws, c_draws = ranges(unit)
+        table["curved_low_units"] = np.quantile(c_draws, 0.05, axis=0)
+        table["curved_high_units"] = np.quantile(c_draws, 0.95, axis=0)
+        out["units"] = int(unit.max()) + 1
+        out["curved_low_units"], out["curved_high_units"] = map(float, np.quantile(c_draws.mean(1), [0.05, 0.95]))
+        out["straight_low_units"], out["straight_high_units"] = map(float, np.quantile(s_draws.mean(1), [0.05, 0.95]))
+    return out
+
+
+def curvature_within(runs: list, labels: list, channels: list[str], names=str, between: int = -1, seed: int = 0,
+                     n_boot: int = 500, fewest: int = 60, verbose: bool = True, what: str = "within settings",
+                     whole_visits: bool = False, k: int = 5) -> pd.DataFrame:
+    """The curvature measure inside each setting on its own: one row per setting.
+
+    For every setting, the data is its unbroken stretches (visits) from all the runs, each with
+    its own average level removed, so what is left is how the sensors move around their level
+    while the setting is held. Every visit is cut into k blocks of time, and each block is
+    predicted by models fitted on the rest (of that visit and the other visits), the same way
+    the pump's sessions were measured. The range of the curved share comes from resampling
+    visits; with two or three visits it is rough. Settings with fewer than two visits of at
+    least `fewest` readings are left out.
+
+    whole_visits=True holds out each visit whole instead. On the Cranfield rig that does not
+    work: the small movements around a held setting differ from visit to visit, so models
+    fitted on other visits predict a held-out visit worse than a flat line.
+    """
+    rows = {}
+    codes = sorted({int(c) for label in labels for c in np.unique(label) if c != between})
+    for code in progress.track(codes, what, verbose=verbose):
+        visits = [X[a:b] - X[a:b].mean(0) for X, label in zip(runs, labels)
+                  for a, b in stretches(label) if label[a] == code and b - a >= fewest]
+        if len(visits) < 2:
+            continue
+        s = curvature_by_run(visits, channels, k=k, seed=seed, n_boot=n_boot, verbose=False,
+                             folds=[np.full(len(v), i) for i, v in enumerate(visits)] if whole_visits else None)
+        rows[names(code)] = {"visits": len(visits), "readings": s["readings"], "straight share": s["straight"],
+                             "curved share": s["curved"], "curved, low": s["curved_low"], "curved, high": s["curved_high"],
+                             "sensors gaining over 0.10 from curves": s["sensors_with_curved_over_10pts"]}
+    out = pd.DataFrame(rows).T.astype({"visits": int, "readings": int, "sensors gaining over 0.10 from curves": int})
+    out.index.name = "setting"
+    return out
+
+
+def best_single_predictor(X: np.ndarray, j: int, slices: int = 50) -> tuple[int, float]:
+    """The one other sensor that on its own says most about sensor j, and the share it explains.
+
+    For every other sensor, the readings are cut into `slices` equal-sized slices by that
+    sensor's value, and sensor j is predicted by its average within each slice. The share of
+    sensor j's movement this explains is high for a straight link and for a bent one alike.
+    """
+    y = X[:, j]
+    total = ((y - y.mean()) ** 2).sum()
+    best, share = -1, -np.inf
+    for i in range(X.shape[1]):
+        if i == j or X[:, i].std() <= 1e-9:
+            continue
+        order = np.argsort(X[:, i], kind="stable")
+        within = sum(((part - part.mean()) ** 2).sum() for part in np.array_split(y[order], slices))
+        if 1 - within / total > share:
+            best, share = i, float(1 - within / total)
+    return best, share
 
 
 def movement_by_run(runs: list, channels: list[str], names: list | None = None) -> pd.DataFrame:

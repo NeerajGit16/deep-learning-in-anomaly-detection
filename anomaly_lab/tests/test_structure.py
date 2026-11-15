@@ -200,3 +200,89 @@ def test_lag_check_refuses_a_delay_that_is_not_among_the_lags_offered():
     import pytest
     with pytest.raises(ValueError):
         S.lag_check(delay=3)
+
+
+def _runs_through_settings(n_runs=3, n_settings=4, n=150, seed=0, flip=True):
+    """Runs that each pass through every setting once, in the same order. Sensor b follows sensor
+    a at even settings and mirrors it at odd ones (if flip); sensor c shows the setting."""
+    rng = np.random.default_rng(seed)
+    runs, labels = [], []
+    for _ in range(n_runs):
+        parts = []
+        for s in range(n_settings):
+            a = rng.normal(size=n)
+            sign = -1 if (flip and s % 2) else 1
+            parts.append(np.c_[a, sign * a + 0.2 * rng.normal(size=n), s + 0.1 * rng.normal(size=n)])
+        runs.append(np.vstack(parts))
+        labels.append(np.repeat(np.arange(n_settings), n))
+    return runs, labels
+
+
+def test_staggered_folds_keep_every_setting_and_every_run_in_training():
+    """Runs that visit the settings in the same order: blocks of time hold out settings the
+    models never saw; whole visits staggered across runs do not."""
+    runs, labels = _runs_through_settings()
+    folds, units = S.staggered_folds(labels)
+    assert S.unseen_share(labels, folds) == 0
+    blocks = [np.repeat(np.arange(4), 150) for _ in runs]              # the same block of time in every run
+    assert S.unseen_share(labels, blocks) == 1
+    fold, label = np.concatenate(folds), np.concatenate(labels)
+    run = np.repeat(np.arange(3), 600)
+    for f in range(3):
+        assert set(label[fold != f]) == {0, 1, 2, 3} and set(run[fold != f]) == {0, 1, 2}
+    assert all(len(set(fo[a:b])) == 1 for fo, la in zip(folds, labels) for a, b in S.stretches(la))   # visits stay whole
+    assert len(np.unique(np.concatenate(units))) == 12                  # 3 runs x 4 visits, numbered apart
+
+
+def test_telling_the_straight_model_the_setting_turns_setting_dependent_links_straight():
+    """b follows a at some settings and mirrors it at others. Pooled, that shows as curved share.
+    A straight model told the setting (its own line per setting) explains it, and no curved share is left."""
+    runs, labels = _runs_through_settings()
+    folds, units = S.staggered_folds(labels)
+    pooled = S.curvature_by_run(runs, list("abc"), n_boot=100, folds=folds, units=units)
+    assert pooled["table"].loc["b", "straight"] < 0.1 and pooled["table"].loc["b", "curved"] > 0.6
+    assert pooled["units"] == 12 and pooled["curved_low_units"] <= pooled["curved"] <= pooled["curved_high_units"]
+    assert {"curved_low_units", "curved_high_units"} <= set(pooled["table"].columns)
+    told = S.curvature_by_run(runs, list("abc"), n_boot=100, folds=folds, modes=labels, told="separate")
+    assert told["table"].loc["b", "straight"] > 0.9 and abs(told["table"].loc["b", "curved"]) < 0.05
+    # its own level per setting is not enough here: the slope itself changes with the setting
+    levels = S.curvature_by_run(runs, list("abc"), n_boot=100, folds=folds, modes=labels, told="levels")
+    assert levels["table"].loc["b", "straight"] < 0.1 and levels["table"].loc["b", "curved"] > 0.6
+
+
+def test_telling_the_straight_model_the_setting_as_levels_explains_setting_dependent_levels():
+    """b sits at a different level at each setting, and the levels follow no straight line in
+    the sensor that shows the setting. Pooled, that is curved share. A straight model given its
+    own level per setting explains it."""
+    runs, labels = _runs_through_settings(flip=False)
+    offset = np.array([0.0, 3.0, -2.0, 1.0])
+    runs = [np.c_[r[:, 0], r[:, 1] + offset[la], r[:, 2]] for r, la in zip(runs, labels)]
+    folds, _ = S.staggered_folds(labels)
+    pooled = S.curvature_by_run(runs, list("abc"), n_boot=50, folds=folds)
+    assert pooled["table"].loc["b", "curved"] > 0.3
+    told = S.curvature_by_run(runs, list("abc"), n_boot=50, folds=folds, modes=labels)
+    assert told["table"].loc["b", "straight"] > 0.9 and abs(told["table"].loc["b", "curved"]) < 0.05
+
+
+def test_curvature_within_looks_inside_each_setting_and_finds_straight_links():
+    runs, labels = _runs_through_settings()
+    t = S.curvature_within(runs, labels, list("abc"), names=lambda c: f"setting {c}", n_boot=50)
+    assert list(t.index) == [f"setting {c}" for c in range(4)] and (t["visits"] == 3).all() and (t["readings"] == 450).all()
+    assert (t["curved share"].abs() < 0.05).all() and (t["sensors gaining over 0.10 from curves"] == 0).all()
+    assert (t["straight share"] > 0.25).all()          # b from a is straight inside every setting; c is noise there
+
+
+def test_a_sensor_that_never_moves_counts_as_nothing_explained():
+    runs = [np.c_[r, np.ones(len(r))] for r in np.split(linked_sensors(600, 3, curve=0.0, seed=0), 3)]
+    out = S.curvature_by_run(runs, ["s0", "s1", "s2", "stuck"], k=3, n_boot=20)
+    assert out["table"].loc["stuck", "straight"] == 0 and out["table"].loc["stuck", "curved"] == 0
+
+
+def test_best_single_predictor_finds_a_bent_link_as_readily_as_a_straight_one():
+    rng = np.random.default_rng(0)
+    a, b, c = rng.normal(size=(3, 2000))
+    X = np.c_[a, b, a ** 2 + 0.1 * rng.normal(size=2000), 2 * b + 0.1 * rng.normal(size=2000), c]
+    assert S.best_single_predictor(X, 2)[0] == 0 and S.best_single_predictor(X, 2)[1] > 0.9     # bent: a squared
+    assert S.best_single_predictor(X, 3)[0] == 1 and S.best_single_predictor(X, 3)[1] > 0.9     # straight: 2 b
+    assert S.best_single_predictor(X, 4)[1] < 0.1                                               # c follows nothing
+
