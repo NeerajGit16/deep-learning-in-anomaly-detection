@@ -273,6 +273,25 @@ def _flexible(seed: int = 0):
                                          early_stopping=False)
 
 
+class KinkedRidge:
+    """A straight-line model allowed corners: each input x also enters as max(0, x - knot) for knots
+    at its 10th, 50th and 90th percentiles in the data it is fitted on, then the same ridge regression."""
+
+    def __init__(self, quantiles: tuple = (0.1, 0.5, 0.9)):
+        self.quantiles = quantiles
+
+    def _expand(self, A):
+        return np.hstack([A] + [np.maximum(0.0, A - k) for k in self.knots_])
+
+    def fit(self, A, y):
+        self.knots_ = [np.quantile(A, q, axis=0) for q in self.quantiles]
+        self.model_ = _straight().fit(self._expand(A), y)
+        return self
+
+    def predict(self, A):
+        return self.model_.predict(self._expand(A))
+
+
 class LinkResidual(Detector):
     """Predict each sensor from the others; score = largest surprise across sensors.
 
@@ -286,10 +305,12 @@ class LinkResidual(Detector):
         self.curved, self.window, self.k, self.seed = curved, window, k, seed
         self.name = "Curved-link residual" if curved else "Straight-link residual"
 
+    straight_model = staticmethod(_straight)
+
     def _fit_pair(self, A, y):
         if A.shape[1] == 0:              # no other sensor varies: nothing to predict from
             return None, None
-        m1 = _straight().fit(A, y)
+        m1 = self.straight_model().fit(A, y)
         m2 = _flexible(self.seed).fit(A, y - m1.predict(A)) if self.curved else None
         return m1, m2
 
@@ -373,6 +394,16 @@ class CurvedLinkResidual(LinkResidual):
         super().__init__(curved=True, window=window, k=k, seed=seed)
 
 
+class KinkedLinkResidual(LinkResidual):
+    """The straight-link detector with a straight model allowed corners (KinkedRidge), scored the same way."""
+    name = "Kinked-link residual"
+    straight_model = staticmethod(KinkedRidge)
+
+    def __init__(self, window: int = 5, k: int = 5):
+        super().__init__(curved=False, window=window, k=k)
+        self.name = type(self).name
+
+
 class StraightLinkStageTold(LinkResidual):
     """Straight-link residual that is told which stage of a batch each reading belongs to.
 
@@ -408,6 +439,7 @@ REGISTRY = {
     "link_straight": StraightLinkResidual,
     "link_curved": CurvedLinkResidual,
     "link_straight_told": StraightLinkStageTold,
+    "link_kinked": KinkedLinkResidual,
 }
 
 
@@ -422,4 +454,12 @@ def available() -> list[str]:
         import stumpy  # noqa: F401
     except ImportError:
         keys.remove("matrix_profile")
+    from . import deep
+    if not deep.torch_available():
+        keys = [k for k in keys if k not in deep.MODELS]
     return keys
+
+
+# The deep models and the straight forecaster live in deep.py, which adds them to REGISTRY when
+# imported. PyTorch is only needed to fit a deep model, not to import either module.
+from . import deep as _deep  # noqa: E402,F401

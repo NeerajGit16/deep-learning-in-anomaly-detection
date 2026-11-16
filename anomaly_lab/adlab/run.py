@@ -44,6 +44,7 @@ EXTRA_METHODS = {
     # inside fit, on held-aside normal data, so nothing is set here.
     "deep_ae": {}, "deep_lstm": {}, "deep_gdn": {}, "deep_gdn_paper": {}, "deep_usad": {},
     "straight_forecaster": {},
+    "pca_twin": {},          # added after the first deep-model results: PCA scored like the autoencoder
 }
 FAR = 0.01
 # A gap between two methods smaller than this is not called a win. It is a fixed number, so it

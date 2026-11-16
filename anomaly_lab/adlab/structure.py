@@ -41,7 +41,7 @@ def _lagged(Z: np.ndarray, lags: tuple) -> tuple[np.ndarray, np.ndarray]:
 
 def held_out_by_run(runs: list, k: int = 5, seed: int = 0, lags: tuple = (), verbose: bool = True,
                     what: str = "curvature measure", folds: list | None = None, modes: list | None = None,
-                    told: str = "levels") -> dict:
+                    told: str = "levels", second: str = "flexible") -> dict:
     """For every sensor: its held-out prediction from the OTHER sensors, straight and straight+flexible.
 
     runs   list of (readings, sensors) arrays: separate recordings of the same sensors. They are
@@ -127,6 +127,12 @@ def held_out_by_run(runs: list, k: int = 5, seed: int = 0, lags: tuple = (), ver
                 fitted, p = m1.predict(np.c_[A, yes_no[train]]), m1.predict(np.c_[B, yes_no[test]])
             else:
                 fitted, p = _straight_by_mode(A, y, mode[train], B, mode[test])
+            if second == "kinked":          # a straight model allowed corners, in place of the flexible one
+                from .detectors import KinkedRidge
+                lin[test, j] = p
+                both[test, j] = KinkedRidge().fit(A, y).predict(B)
+                next(steps, None)
+                continue
             if mode is not None:
                 A, B = np.c_[A, mode[train]], np.c_[B, mode[test]]
             m2 = _flexible(seed).fit(A, y - fitted)
@@ -251,7 +257,7 @@ def curvature_summary(X: np.ndarray, channels: list[str], k: int = 5, seed: int 
 def curvature_by_run(runs: list, channels: list[str], k: int = 5, seed: int = 0, n_boot: int = 500,
                      lags: tuple = (), verbose: bool = True, what: str = "curvature measure",
                      folds: list | None = None, modes: list | None = None, units: list | None = None,
-                     told: str = "levels") -> dict:
+                     told: str = "levels", second: str = "flexible") -> dict:
     """The curvature measure for several separate runs, with ranges from resampling whole runs.
 
     Same measure as curvature_summary (see held_out_by_run for how readings are held out), and the
@@ -268,7 +274,7 @@ def curvature_by_run(runs: list, channels: list[str], k: int = 5, seed: int = 0,
                    stretches instead of whole runs: "curved_low_units"/"curved_high_units" (and
                    the same for "straight"), in the summary and per sensor, plus "units".
     """
-    h = held_out_by_run(runs, k, seed, lags, verbose, what, folds, modes, told)
+    h = held_out_by_run(runs, k, seed, lags, verbose, what, folds, modes, told, second)
     scored = h["scored"]                                   # runs that were only fitted on have no predictions
     h = {key: value[scored] for key, value in h.items()}
     h["run"] = np.unique(h["run"], return_inverse=True)[1]

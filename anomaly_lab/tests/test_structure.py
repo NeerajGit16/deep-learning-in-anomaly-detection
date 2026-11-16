@@ -301,3 +301,32 @@ def test_whole_runs_can_be_fitted_on_only_and_the_rest_scored_once():
     assert out["runs"] == 3 and out["readings"] == 1800
     usual = S.curvature_by_run(runs, names, k=3, n_boot=50)
     assert abs(out["curved"] - usual["curved"]) < 0.1 and out["curved"] > 0.08
+
+
+def test_kinked_straight_model_recovers_a_corner_but_not_more_than_the_flexible_one():
+    """A sensor that follows another through a corner (max(0, x)): the kinked straight model
+    recovers most of what a plain straight line misses; on straight links it adds about nothing."""
+    from adlab.detectors import KinkedRidge
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=3000)
+    corner = np.c_[x, np.maximum(0, x) + 0.05 * rng.normal(size=3000)]
+    line = np.c_[x, 0.7 * x + 0.05 * rng.normal(size=3000)]
+    for data, expect in ((corner, "gain"), (line, "none")):
+        runs = [data[:1500], data[1500:]]
+        flex = S.curvature_by_run(runs, ["x", "y"], n_boot=20, verbose=False)
+        kink = S.curvature_by_run(runs, ["x", "y"], n_boot=20, verbose=False, second="kinked")
+        if expect == "gain":
+            assert kink["table"].loc["y", "curved"] > 0.5 * flex["table"].loc["y", "curved"] > 0.05
+        else:
+            assert abs(kink["table"].loc["y", "curved"]) < 0.01
+    m = KinkedRidge().fit(corner[:, :1], corner[:, 1])
+    assert len(m.knots_) == 3 and np.abs(m.predict(corner[:, :1]) - corner[:, 1]).mean() < 0.1
+
+
+def test_kinked_link_detector_is_registered_and_scores_every_reading():
+    from adlab import detectors as det, run
+    from adlab.simulate import linked_sensors
+    X = linked_sensors(600, 4, curve=1.0, seed=0)
+    model = det.make("link_kinked").fit(X[:400])
+    assert model.name == "Kinked-link residual" and model.score(X[400:]).shape == (200,)
+    assert "link_kinked" not in run.METHODS and run.settings("link_kinked") == {"window": 5}
