@@ -407,7 +407,8 @@ def dataset(told: bool = False, raw: Path = RAW) -> Dataset:
                 meta={"experiment": w["experiment"], "fault": w["fault"]}) for w in faulty_wafers(raw)]
     val = [Run(w["wafer"], x(w), np.zeros(w["readings"], int), fit, group="normal",
                meta={"experiment": w["experiment"], "role": role}) for w, role in zip(ws, r) if role != "fit"]
-    return Dataset(TOLD_NAME if told else CACHE, runs, CHANNELS + (["Step Number"] if told else []), 1.0, val)
+    return Dataset(TOLD_NAME if told else CACHE, runs, CHANNELS + (["Step Number"] if told else []), 1.0, val,
+                   fit_lengths=[w["readings"] for w, role in zip(ws, r) if role == "fit"])
 
 
 def methods() -> list[str]:

@@ -39,6 +39,11 @@ METHODS = {
 # and never by default: the stage-told straight-link residual needs a stage column (batch.py).
 EXTRA_METHODS = {
     "link_straight_told": {"window": 5},
+    "link_kinked": {"window": 5},
+    # The deep models and the LSTM's straight twin (adlab/deep.py): their settings are chosen
+    # inside fit, on held-aside normal data, so nothing is set here.
+    "deep_ae": {}, "deep_lstm": {}, "deep_gdn": {}, "deep_gdn_paper": {}, "deep_usad": {},
+    "straight_forecaster": {},
 }
 FAR = 0.01
 # A gap between two methods smaller than this is not called a win. It is a fixed number, so it
@@ -74,7 +79,10 @@ def score_dataset(ds: D.Dataset, method: str, seed: int, verbose: bool = True) -
     def scored(run: D.Run) -> np.ndarray:
         key = id(run.fit)
         if key not in fitted:
-            model = det.make(method, **params).fit(run.fit)
+            model = det.make(method, **params)
+            if hasattr(model, "context_"):        # models that hold data aside whole runs at a time, and log
+                model.context_ = {"dataset": ds.name, "run": run.name, "lengths": ds.fit_lengths}
+            model.fit(run.fit)
             fitted[key] = (model, model.score_fit(run.fit))
         model, fit_scores = fitted[key]
         return M.normalise(model.score(run.X), fit_scores)
@@ -179,7 +187,8 @@ def _label(method: str) -> str:
 
 def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int,
                    resample: str | list = "runs", keep: list | None = None,
-                   calibration: str | None = None, verbose: bool = True) -> dict:
+                   calibration: str | None = None, verbose: bool = True, sources: dict | None = None,
+                   line_keep: list | None = None) -> dict:
     """Every method's catch rate on a dataset, from its cached scores, with intervals and paired gaps.
 
     resample     what the intervals redraw: "runs" (single runs), "groups" (whole kinds of fault,
@@ -188,7 +197,12 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int,
     keep         optional True/False per run, to report on only part of the dataset.
     calibration  how the alarm line is set, if not the dataset's own way (see data.Dataset).
                  E.g. "pooled" on a Tennessee Eastman set gives the older first-8-hours line.
+    sources      {method: Dataset} for methods scored on another copy of the same runs (for
+                 example with the mode added as a last column, for a detector told the mode).
+                 Their scores and calibration scores are read from that copy.
+    line_keep    optional True/False per calibration run (matched line): set the line on part of them.
     """
+    sources = sources or {}
     keep = [True] * len(ds.runs) if keep is None else list(keep)
     kept = [r for r, k in zip(ds.runs, keep) if k]
     labels = [r.y for r in kept]
@@ -200,14 +214,18 @@ def report_dataset(ds: D.Dataset, methods: list[str], n_seeds: int, n_boot: int,
     summary, by_group, primary, calibs = [], [], {}, {}
     with_vus = M.vus_available()     # the VUS-PR column is left out when TSB-AD is not installed
     for m in progress.track(methods, f"reading scores of {ds.name}", verbose=verbose):
-        seeds = [s for s in _seeds(m, n_seeds) if _cache_path(ds.name, m, s).exists()]
+        src = sources.get(m, ds)
+        seeds = [s for s in _seeds(m, n_seeds) if _cache_path(src.name, m, s).exists()]
         if not seeds:
             continue
         per_seed = []
         for seed in seeds:
-            runs, val, secs = load_scores(ds.name, m, seed)
+            runs, val, secs = load_scores(src.name, m, seed)
             runs = [s for s, k in zip(runs, keep) if k]
-            cal = calibration_scores(ds, m, seed)
+            cal = calibration_scores(src, m, seed)
+            if line_keep is not None:
+                cal = [c for c, k in zip(cal, line_keep) if k] if cal else cal
+                val = [v for v, k in zip(val, line_keep) if k] if val else val
             p1 = M.dr_at_far(runs, labels, FAR, mode, cal)
             p5 = M.dr_at_far(runs, labels, 0.05, mode, cal)
             dep = M.deployable(runs, labels, FAR, val)
@@ -320,7 +338,9 @@ def two_lines_table(pair: dict, digits: int = 2) -> pd.DataFrame:
     return out
 
 
-def false_alarms_around_fault(ds: D.Dataset, methods: list[str] | None = None, far: float = FAR) -> pd.DataFrame:
+def false_alarms_around_fault(ds: D.Dataset, methods: list[str] | None = None, far: float = FAR,
+                              sources: dict | None = None, keep: list | None = None,
+                              line_keep: list | None = None) -> pd.DataFrame:
     """Where a matched alarm line's false alarms fall in the scored runs: before the fault, or after it has started.
 
     For datasets whose runs have normal readings both before a fault and after it is removed.
@@ -329,13 +349,20 @@ def false_alarms_around_fault(ds: D.Dataset, methods: list[str] | None = None, f
     line carries over from the separate normal data, both are about `far`. A high "before" says
     the runs' normal readings look different to the detector from the day it was fitted on; a
     high "after" with a low "before" says the system has not settled back.
+    sources and keep as in report_dataset.
     """
+    sources = sources or {}
+    keep = [True] * len(ds.runs) if keep is None else list(keep)
+    kept = [r for r, k in zip(ds.runs, keep) if k]
     rows = {}
     for m in methods or [k for k in METHODS if k in det.available()]:
-        scores = load_scores(ds.name, m, 0)[0]
-        thr = M.dr_at_far(scores, [r.y for r in ds.runs], far, "matched", calibration_scores(ds, m, 0))["threshold"]
+        src = sources.get(m, ds)
+        scores = [s for s, k in zip(load_scores(src.name, m, 0)[0], keep) if k]
+        cal = calibration_scores(src, m, 0)
+        cal = cal if line_keep is None else [c for c, k in zip(cal, line_keep) if k]
+        thr = M.dr_at_far(scores, [r.y for r in kept], far, "matched", cal)["threshold"]
         before, after = [], []
-        for s, r in zip(scores, ds.runs):
+        for s, r in zip(scores, kept):
             first = int(np.flatnonzero(r.y)[0])
             before.append(s[:first] > thr)
             after.append(s[first:][r.y[first:] == 0] > thr)

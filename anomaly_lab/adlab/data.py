@@ -63,6 +63,9 @@ class Dataset:
     # The dataset whose runs are those fault-free runs (scored and cached under its own name).
     # None means the fault-free runs are val_normal.
     matched_from: Dataset | None = None
+    # Lengths of the runs joined end to end into the fit data, when every run shares one fit array.
+    # Models that hold whole runs aside (deep.py) use it; None means one stretch.
+    fit_lengths: list | None = None
 
     def calibration_runs(self) -> list[Run]:
         """The fault-free runs that set the alarm line under "matched" calibration."""
@@ -332,7 +335,7 @@ def _fault_free_set(base: str, group: str, raw: Path, first_run: int, runs: int,
                meta={"fault": 0, "run": first_run + r, "onset": RIETH_ONSET}) for r in range(runs)]
     return Dataset(_rieth_name(base, (first_run, runs, fit_runs), default), out, TEP_CHANNELS, 180.0, None,
                    calibration="matched" if matched_from is not None else "pooled",
-                   matched_start=RIETH_ONSET, matched_from=matched_from)
+                   matched_start=RIETH_ONSET, matched_from=matched_from, fit_lengths=[len(fit) // fit_runs] * fit_runs)
 
 
 def load_tep_rieth_calibration(raw: Path = RAW, first_run: int = 51, runs: int = 50, fit_runs: int = 20) -> Dataset:
@@ -370,7 +373,8 @@ def load_tep_rieth(raw: Path = RAW, runs_per_fault: int = 50, fit_runs: int = 20
            for r, x in enumerate(normal)]
     name = _rieth_name("tep_rieth", (runs_per_fault, fit_runs, val_runs), (50, 20, 20))
     return Dataset(name, runs, TEP_CHANNELS, 180.0, val, calibration="matched", matched_start=RIETH_ONSET,
-                   matched_from=load_tep_rieth_calibration(raw, runs_per_fault + 1, calibration_runs, fit_runs))
+                   matched_from=load_tep_rieth_calibration(raw, runs_per_fault + 1, calibration_runs, fit_runs),
+                   fit_lengths=[len(fit) // fit_runs] * fit_runs)
 
 
 def load_tep_rieth_control(raw: Path = RAW, runs: int = 50, fit_runs: int = 20, calibration_runs: int = 50) -> Dataset:
@@ -586,7 +590,8 @@ def load_cranfield(raw: Path = RAW, fit: tuple = ("T2", "T3"), calibrate: tuple 
     val = [Run(k, normal[k], np.zeros(len(normal[k]), int), fit_data, group="normal") for k in calibrate]
     name = "cranfield" if (tuple(fit), tuple(calibrate)) == (("T2", "T3"), ("T1",)) \
         else f"cranfield_fit{''.join(fit)}_cal{''.join(calibrate)}"
-    return Dataset(name, runs, CRANFIELD_CHANNELS, 1.0, val, calibration="matched", matched_start=0)
+    return Dataset(name, runs, CRANFIELD_CHANNELS, 1.0, val, calibration="matched", matched_start=0,
+                   fit_lengths=[len(normal[k]) for k in fit])
 
 
 # ---------------------------------------------------------------- plain-English descriptions

@@ -617,3 +617,103 @@ def mode_table() -> pd.DataFrame:
         rows[f"mode {m}"] = {f"{label} ({c})": block[:, data.TEP_CHANNELS.index(c)].mean() for c, label in keys.items()}
     return pd.DataFrame(rows).T
 
+
+
+# ---------------------------------------------------------------- detectors (task 6, part 2)
+#
+# Fixed before any detector was run on this data (notebook 06, section 13):
+#   fit         runs 1-4 of every mode's 5 distinct fault-free runs (24 runs), start-up left out
+#   alarm line  run 5 of every mode (6 runs, which fit nothing), over the readings after hour 30
+#               (the same stretch of a run as the faults), one line for all modes
+#   scored      the 168 faulty runs, start-up left out; a reading is faulty if taken after hour 30
+# No faulty run shares random numbers with a normal run (twin_check), so one fit is enough.
+
+FIT_RUNS = (0, 1, 2, 3)             # positions within DISTINCT
+LINE_RUN = 4
+FAULT_FROM = int(CHANGE_AT_HOUR * 20) - START_UP      # first reading taken after hour 30, once the start-up is dropped
+TOLD_KEY = "link_straight_told"
+
+
+def detector_dataset(told: bool = False, raw: Path = data.RAW) -> data.Dataset:
+    """The faulty runs to score, the fit data and the alarm-line runs, as a Dataset (matched-window line).
+
+    told=True appends the mode as a last column, for the straight-link detector told the mode.
+    """
+    def x(X, m):
+        return np.column_stack([X, np.full(len(X), m)]) if told else X
+
+    fit = np.vstack([x(fault_free(m, raw)[k][START_UP:], m) for m in MODES for k in FIT_RUNS])
+    runs = []
+    for m in MODES:
+        for f, X in sorted(faulty(m, raw).items()):
+            X = X[START_UP:]
+            runs.append(data.Run(f"mode{m}_idv{f:02d}", x(X, m), (np.arange(len(X)) >= FAULT_FROM).astype(int), fit,
+                                 group=f"IDV({f})", meta={"mode": m, "fault": f}))
+    val = []
+    for m in MODES:
+        X = fault_free(m, raw)[LINE_RUN][START_UP:]
+        val.append(data.Run(f"mode{m}_normal{LINE_RUN + 1}", x(X, m), np.zeros(len(X), int), fit, group="normal",
+                            meta={"mode": m}))
+    return data.Dataset("tep6_told" if told else "tep6", runs, data.TEP_CHANNELS + (["mode"] if told else []), 180.0, val,
+                        calibration="matched", matched_start=FAULT_FROM,
+                        fit_lengths=[READINGS - START_UP] * (len(MODES) * len(FIT_RUNS)))
+
+
+def detector_methods() -> list[str]:
+    from . import detectors as det, run
+    return [m for m in run.METHODS if m in det.available()] + [TOLD_KEY]
+
+
+def score(verbose: bool = True):
+    """Score every faulty and alarm-line run with the eight detectors and the mode-told one (cached)."""
+    from . import run
+    run.score_all([detector_dataset()], methods=[m for m in detector_methods() if m != TOLD_KEY], n_seeds=5, verbose=verbose)
+    run.score_all([detector_dataset(told=True)], methods=[TOLD_KEY], verbose=verbose)
+
+
+def detector_report(mode: int | None = None, n_boot: int = 1000, verbose: bool = True) -> dict:
+    """run.report_dataset on all modes together (mode=None) or one mode's 28 faulty runs, with the
+    one alarm line for all modes. Cached in results/cache."""
+    from . import run, structure
+    score(verbose)
+    ds = detector_dataset()
+    keep = None if mode is None else [r.meta["mode"] == mode for r in ds.runs]
+    return structure.cached(f"tep6_report_{'all' if mode is None else f'mode{mode}'}", lambda: run.report_dataset(
+        ds, detector_methods(), 5, n_boot, keep=keep, verbose=verbose, sources={TOLD_KEY: detector_dataset(told=True)}))
+
+
+def told_name(frame: pd.DataFrame) -> pd.DataFrame:
+    """Rename the stage-told detector to say "mode told", as it is used here."""
+    rename = {"Straight-link residual, stage told": "Straight-link residual, mode told"}
+    return frame.rename(index=rename, columns=rename)
+
+
+def per_mode_table(reports: dict, digits: int = 2) -> pd.DataFrame:
+    """Catch rate (with range) of every detector, one column per report (all modes, then each mode)."""
+    from . import run
+    return told_name(pd.DataFrame({name: run.rates(res, digits) for name, res in reports.items()}))
+
+
+def link_gaps(reports: dict) -> pd.DataFrame:
+    """Curved-link minus straight-link catch rate, with its range and verdict, per report."""
+    from . import run
+    rows = {}
+    for name, res in reports.items():
+        g = run.gap_table(res, "Curved-link residual", ["Straight-link residual"]).iloc[0]
+        rows[name] = {"curved minus straight": g["gap"], "low": g["low"], "high": g["high"], "verdict": g["verdict"]}
+    out = pd.DataFrame(rows).T
+    out.index.name = "runs scored"
+    return out
+
+
+def before_fault() -> pd.DataFrame:
+    """False alarms on the faulty runs' own readings before hour 30, under the one alarm line."""
+    from . import run
+    return told_name(run.false_alarms_around_fault(detector_dataset(), detector_methods(),
+                                                   sources={TOLD_KEY: detector_dataset(told=True)}))
+
+
+def fault_kinds() -> pd.DataFrame:
+    """structure.fault_types on all 168 faulty runs (kinds = the 28 faults, all modes together)."""
+    from . import structure
+    return structure.cached("tep6_kinds", lambda: structure.fault_types(detector_dataset(), saved=True))
