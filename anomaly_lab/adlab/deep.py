@@ -363,7 +363,8 @@ class DeepDetector(Detector):
         torch.save({"state": net.state_dict(), "error": err, "passes": passes, "seconds": secs}, path)
         STORE.mkdir(parents=True, exist_ok=True)
         with open(LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"model": self.family, "dataset": self.context_.get("dataset"), "run": self.context_.get("run"),
+            f.write(json.dumps({"model": getattr(self, "log_name", self.family), "dataset": self.context_.get("dataset"),
+                                "run": self.context_.get("run"),
                                 "fit": self._key(X), "seed": self.seed, "setting": opt, "weights": weights(net),
                                 "held-aside error": err, "predict-the-average error": self.baseline_error_,
                                 "passes": passes, "seconds": round(secs, 2), "peak GPU MB": round(peak, 1),
@@ -803,7 +804,7 @@ def training_table(dataset_name: str):
     if not LOG.exists():
         return pd.DataFrame()
     rows = [json.loads(line) for line in LOG.read_text(encoding="utf-8").splitlines() if line.strip()]
-    rows = [r for r in rows if (r.get("dataset") or "").startswith(dataset_name)]
+    rows = [r for r in rows if (r.get("dataset") or "").startswith(dataset_name) and "notebook 11" not in r["model"]]
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
