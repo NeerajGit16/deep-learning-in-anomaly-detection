@@ -286,3 +286,18 @@ def test_best_single_predictor_finds_a_bent_link_as_readily_as_a_straight_one():
     assert S.best_single_predictor(X, 3)[0] == 1 and S.best_single_predictor(X, 3)[1] > 0.9     # straight: 2 b
     assert S.best_single_predictor(X, 4)[1] < 0.1                                               # c follows nothing
 
+
+
+def test_whole_runs_can_be_fitted_on_only_and_the_rest_scored_once():
+    """Fold -1 means "only ever fitted on". Six runs with a curved link: fit on three, score the
+    other three. Only the scored runs count, and the answer agrees with the usual measure."""
+    runs = np.split(linked_sensors(3600, 4, curve=1.0, seed=0), 6)
+    names = [f"s{i}" for i in range(4)]
+    folds = [np.full(600, -1 if i < 3 else 0) for i in range(6)]
+    h = S.held_out_by_run(runs, folds=folds, verbose=False)
+    assert h["scored"].sum() == 1800 and (h["straight"][~h["scored"]] == 0).all()
+    assert set(h["run"][h["scored"]]) == {3, 4, 5}
+    out = S.curvature_by_run(runs, names, n_boot=50, folds=folds)
+    assert out["runs"] == 3 and out["readings"] == 1800
+    usual = S.curvature_by_run(runs, names, k=3, n_boot=50)
+    assert abs(out["curved"] - usual["curved"]) < 0.1 and out["curved"] > 0.08

@@ -37,12 +37,15 @@ uv run pytest                            # checks everything works
 | `03_fresh_runs.ipynb` | The same detectors on 1,000 Tennessee Eastman runs they have never seen (Rieth files): which results hold |
 | `04_delayed_links.ipynb` | Whether links that arrive late (one sensor following another after a delay) change the picture |
 | `05_cranfield.ipynb` | A real flow rig run at 20 flow settings (Cranfield): how curved its links are, and the detectors on its 16 faulty runs |
+| `06_multimode_tep.ipynb` | The chemical plant run in six operating modes (Reinartz files): how curved its links are when the modes are pooled |
 | `adlab/data.py` | Loads SKAB, Tennessee Eastman (Braatz and Rieth files) and the Cranfield flow rig; plain-English sensor tables (`SKAB_INFO`, `TEP_INFO`, `CRANFIELD_INFO`) |
 | `adlab/explore.py` | Summary tables: faults per kind, how far each sensor moves, which sensors move together |
 | `adlab/plots.py` | All the figures |
 | `adlab/detectors.py` | The six simple detectors, plus the straight-link and curved-link residual detectors |
 | `adlab/structure.py` | Curvature measure and fault labelling |
 | `adlab/cranfield.py` | The curvature measures for the Cranfield rig, whose runs each pass through many flow settings |
+| `adlab/multimode.py` | Fetches and loads the six-mode Tennessee Eastman runs, and puts its curvature measures together |
+| `adlab/remote.py` | Reads parts of a very large remote file without downloading all of it |
 | `adlab/cva.py` | The Cranfield authors' own monitoring method, ported from their example; used only to check we read their data as they do |
 | `adlab/simulate.py` | A first small simulator with a curvature dial |
 | `adlab/metrics.py` | Catch rate at a fixed false-alarm rate, and other scores. For Tennessee Eastman the alarm line is set on fault-free readings from the same hours of a run as the faults |
@@ -73,6 +76,7 @@ uv run python -m adlab.run report    # writes results/pilot_report.md and figure
 - **SKAB:** Katser and Kozitsin, Skoltech, 2020. https://github.com/waico/SKAB (GPL-3.0).
 - **Cranfield multiphase flow rig:** Ruiz-Carcel, Cao, Mba, Lao and Samuel, 2015, *Statistical process monitoring of a multiphase flow facility*, Control Engineering Practice 42, 74-88. Data: the `cvatutor` package, version 1.1.0 (MATLAB File Exchange 50938). It is not downloaded automatically: unpack it by hand so that the `.mat` files sit in `data/raw/cranfield/cvatutor-1.1.0/CVACaseStudy/`.
 - **Tennessee Eastman:**
+  - Six operating modes: Reinartz, Kulahci and Ravn, 2021, *An extended Tennessee Eastman simulation dataset for fault-detection and decision support systems*, Computers and Chemical Engineering 149, 107281. Data: data.dtu.dk, [doi:10.11583/DTU.13385936](https://doi.org/10.11583/DTU.13385936) (public domain). The full set is 143 GB; `06_multimode_tep.ipynb` fetches only the fault-free and mode-transition runs (about 0.5 GB, about 17 minutes) by reading them out of the remote files.
   - Plant model: Downs and Vogel, 1993.
   - Data files: Braatz lab, University of Illinois, via https://github.com/camaramm/tennessee-eastman-profBraatz.
   - Fresh runs: Rieth, Amsel, Tran and Cook, 2017, *Additional Tennessee Eastman Process Simulation Data for Anomaly Detection Evaluation*, Harvard Dataverse, [doi:10.7910/DVN/6C3JR1](https://doi.org/10.7910/DVN/6C3JR1) (public domain). About 910 MB, downloaded only when `03_fresh_runs.ipynb` is run or with `uv run python -m adlab.download tep_rieth`.

@@ -294,10 +294,13 @@ def curved_share(summaries: dict, title: str = "How curved are the links between
 
     low, high   which range to draw (e.g. "curved_low_units" for the range from resampling visits)
     mark        draw a second dashed line at this value (e.g. 0.03, the go/no-go mark)
-    points      label the axis in points with one decimal place (+2.2) instead of whole percent
+    points      label the axis in points with one decimal place (+2.2) instead of whole percent;
+                values under one point are labelled with two decimals (+0.07)
     """
     def show(v):
-        return f"{100 * v:+.1f}" if points else f"{v:+.1%}"
+        if not points:
+            return f"{v:+.1%}"
+        return f"{100 * v:+.2f}" if abs(100 * v) < 0.95 else f"{100 * v:+.1f}"
 
     names = list(summaries)[::-1]
     fig, ax = plt.subplots(figsize=(7.2, 0.6 * len(names) + 1.5))
@@ -416,3 +419,50 @@ def scatter_by_setting(X: np.ndarray, label: np.ndarray, pairs: list, names: lis
     fig.tight_layout()
     return fig
 
+
+# ---------------------------------------------------------------- multi-mode Tennessee Eastman
+
+def scatter_by_mode(X: np.ndarray, mode: np.ndarray, pairs: list, names: list, describe: dict | None = None,
+                    every: int = 4):
+    """One row per (sensor, its best single predictor), one small panel per mode.
+
+    Each panel shows all the readings in grey and that mode's readings in blue. With six modes,
+    six colours in one panel would not be told apart reliably, so each mode gets its own panel.
+    If every mode's blue dots lie along one shared bent line, the link is a real curve. If each
+    mode is its own patch, off any shared line, the "curve" is the modes sitting in different places.
+    """
+    describe = describe or {}
+    keep = np.arange(0, len(X), every)
+    modes = sorted(np.unique(mode))
+    fig, axes = plt.subplots(len(pairs), len(modes), figsize=(2.05 * len(modes), 2.5 * len(pairs) + 0.4),
+                             squeeze=False, sharex="row", sharey="row")
+    for row, (target, partner) in zip(axes, pairs):
+        x, y, m = X[keep, names.index(partner)], X[keep, names.index(target)], np.asarray(mode)[keep]
+        for ax, k in zip(row, modes):
+            ax.scatter(x, y, s=2, color="#d5d4cf", lw=0, rasterized=True)
+            ax.scatter(x[m == k], y[m == k], s=2, color=BLUE, lw=0, rasterized=True)
+            ax.set_title(f"mode {k}", fontsize=9)
+            ax.grid(color=GRID, lw=0.6)
+            ax.tick_params(labelsize=7)
+        row[0].set_ylabel(target, fontsize=8)
+        row[len(modes) // 2].set_xlabel(f"up: {describe.get(target, target)}    across: {describe.get(partner, partner)}",
+                                        fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def scatter_panels(panels: list, across: int = 3):
+    """Small scatter panels, one per entry: {"x", "y", "title", "across" (x label), "up" (y label)}."""
+    rows = -(-len(panels) // across)
+    fig, axes = plt.subplots(rows, across, figsize=(3.6 * across, 3.1 * rows + 0.2), squeeze=False)
+    for ax in axes.ravel()[len(panels):]:
+        ax.set_visible(False)
+    for ax, p in zip(axes.ravel(), panels):
+        ax.scatter(p["x"], p["y"], s=3, color=BLUE, lw=0, alpha=0.6, rasterized=True)
+        ax.set_title(p["title"], fontsize=9)
+        ax.set_xlabel(p["across"], fontsize=8)
+        ax.set_ylabel(p["up"], fontsize=8)
+        ax.grid(color=GRID, lw=0.6)
+        ax.tick_params(labelsize=7)
+    fig.tight_layout()
+    return fig

@@ -56,7 +56,10 @@ def held_out_by_run(runs: list, k: int = 5, seed: int = 0, lags: tuple = (), ver
     held-out block of the same run are left out, so no reading is on both sides.
 
     folds  instead of the k blocks of time: one array per run giving, for every reading, the
-           number of the fold that holds it out (see staggered_folds). No gap is left around
+           number of the fold that holds it out (see staggered_folds). A reading numbered -1 is
+           never held out: it is only ever fitted on. So giving whole runs -1 and the other
+           runs 0 fits the models on the first set of runs and scores them on the second, once.
+           No gap is left around
            held-out stretches then, so with lags a training reading may use, as an input, another
            sensor's reading from a held-out stretch. The held-out readings of the sensor being
            predicted are still never seen in training.
@@ -74,7 +77,8 @@ def held_out_by_run(runs: list, k: int = 5, seed: int = 0, lags: tuple = (), ver
 
     Returns a dict of arrays over all kept readings: "Z" (standardised targets), "straight" and
     "both" (predictions), "run" (which run each reading came from), "position" (where in its run,
-    counted after the first max(lags) readings are dropped). Constant sensors are predicted as 0.
+    counted after the first max(lags) readings are dropped) and "scored" (False for readings that
+    were never held out, whose predictions are left at 0). Constant sensors are predicted as 0.
     """
     lags = tuple(lags)
     stacked = np.vstack(runs)
@@ -98,7 +102,7 @@ def held_out_by_run(runs: list, k: int = 5, seed: int = 0, lags: tuple = (), ver
     if told not in ("levels", "separate"):
         raise ValueError("told must be 'levels' or 'separate'")
     yes_no = None if mode is None else (mode[:, None] == np.unique(mode)[None, :]).astype(float)
-    fold_numbers = range(k) if folds is None else sorted(set(fold_id))
+    fold_numbers = range(k) if folds is None else sorted(int(f) for f in set(fold_id) if f >= 0)
     sensor_of_column = np.tile(np.arange(d), 1 + len(lags))
     lin, both = np.zeros_like(Z), np.zeros_like(Z)
     steps = progress.track(range(len(fold_numbers) * int(live.sum())), f"{what} (models fitted)", verbose=verbose)
@@ -131,7 +135,7 @@ def held_out_by_run(runs: list, k: int = 5, seed: int = 0, lags: tuple = (), ver
             next(steps, None)
     for _ in steps:      # let the bar finish and close
         pass
-    return {"Z": Z, "straight": lin, "both": both, "run": run_id, "position": position}
+    return {"Z": Z, "straight": lin, "both": both, "run": run_id, "position": position, "scored": fold_id >= 0}
 
 
 def _straight_by_mode(A, y, mode, B, mode_b, fewest: int = 30):
@@ -265,6 +269,9 @@ def curvature_by_run(runs: list, channels: list[str], k: int = 5, seed: int = 0,
                    the same for "straight"), in the summary and per sensor, plus "units".
     """
     h = held_out_by_run(runs, k, seed, lags, verbose, what, folds, modes, told)
+    scored = h["scored"]                                   # runs that were only fitted on have no predictions
+    h = {key: value[scored] for key, value in h.items()}
+    h["run"] = np.unique(h["run"], return_inverse=True)[1]
     Z = h["Z"] - h["Z"].mean(0)
     sq_lin, sq_both = (h["Z"] - h["straight"]) ** 2, (h["Z"] - h["both"]) ** 2
 
@@ -298,14 +305,14 @@ def curvature_by_run(runs: list, channels: list[str], k: int = 5, seed: int = 0,
     table.index.name = "sensor"
     lo, hi = np.quantile(c_draws.mean(1), [0.05, 0.95])
     s_lo, s_hi = np.quantile(s_draws.mean(1), [0.05, 0.95])
-    out = {"sensors": len(channels), "readings": len(Z), "runs": len(runs),
+    out = {"sensors": len(channels), "readings": len(Z), "runs": int(h["run"].max()) + 1,
            "straight": float(straight.mean()), "straight_low": float(s_lo), "straight_high": float(s_hi),
            "curved": float(curved.mean()), "curved_low": float(lo), "curved_high": float(hi),
            "sensors_with_curved_over_5pts": int((curved > 0.05).sum()),
            "sensors_with_curved_over_10pts": int((curved > 0.10).sum()), "table": table}
     if units is not None:
         back = max(tuple(lags), default=0)
-        unit = np.unique(np.concatenate([np.asarray(u)[back:] for u in units]), return_inverse=True)[1]
+        unit = np.unique(np.concatenate([np.asarray(u)[back:] for u in units])[scored], return_inverse=True)[1]
         _, s_draws, c_draws = ranges(unit)
         table["curved_low_units"] = np.quantile(c_draws, 0.05, axis=0)
         table["curved_high_units"] = np.quantile(c_draws, 0.95, axis=0)
