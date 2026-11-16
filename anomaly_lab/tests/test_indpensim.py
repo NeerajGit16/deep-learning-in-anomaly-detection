@@ -44,6 +44,15 @@ def test_shifted_headers_are_explained_by_the_split_header():
 
 
 @needs_data
+def test_every_faulty_batch_matches_exactly_one_simulator_fault_and_each_timing_is_one_type():
+    t = I.fault_types()
+    assert len(t) == 10 and not t["fault type"].str.contains(" or |no match").any()
+    assert t.groupby("timing")["fault type"].nunique().max() == 1
+    assert set(t.loc[[91, 95, 97], "fault type"]) == {"substrate feed"}
+    assert set(t["fault type"]) == {"substrate feed", "base flow", "coolant flow", "aeration"}
+
+
+@needs_data
 def test_columns_that_never_move_are_marked():
     t = I.column_table()
     still = set(t.index[~t["moves in normal batches"].astype(bool)])

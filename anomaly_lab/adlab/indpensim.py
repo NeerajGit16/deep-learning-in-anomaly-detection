@@ -476,14 +476,60 @@ def fault_kind_labels(raw: Path = RAW) -> dict:
     return out
 
 
-def detector_dataset(told: bool = False, raw: Path = RAW):
+# The simulator's process faults, as its Python port (PenSimPy, peni_env_setup.py, MIT licence) codes
+# them: hours in which a controller output is forced to a fixed value (one step = 0.2 h). Faults 7 and
+# 8 (temperature and pH sensor drifts) and 6 (all at once) do not appear in batches 91-100.
+FAULT_CATALOGUE = {
+    "aeration": {"column": "aeration", "stretches": [(20, 24), (100, 110)], "forced to": [20]},
+    "vessel back pressure": {"column": "head pressure", "stretches": [(100, 104), (200, 240)], "forced to": [2]},
+    "substrate feed": {"column": "sugar feed", "stretches": [(20, 30), (76, 92), (200, 214)], "forced to": [2, 20]},
+    "base flow": {"column": "base flow", "stretches": [(80, 84), (140, 160)], "forced to": [5, 10]},
+    "coolant flow": {"column": "cooling water", "stretches": [(70, 90), (240, 270)], "forced to": [2, 10]},
+}
+
+
+def fault_types(raw: Path = RAW) -> pd.DataFrame:
+    """Per faulty batch: which fault of FAULT_CATALOGUE it carries, with the evidence. A batch matches a fault
+    when every stretch of its fault flag starts at one of the fault's stretches (a stretch can be cut short
+    by the end of the batch, and stretches after the batch's end are missing), and the controller output
+    named holds only the fault's forced values while the flag is on."""
+    d = readings(raw)
+    timing = fault_kind_labels(raw)
+    rows = {}
+    for b, x in d[d["faulty batch"] == 1].groupby("batch"):
+        on = x["fault"].to_numpy() == 1
+        t = x["time"].to_numpy()
+        edges = np.flatnonzero(np.diff(np.r_[0, on.astype(int), 0]))
+        spans = [(float(t[a]), float(t[e - 1])) for a, e in zip(edges[::2], edges[1::2])]
+        match = []
+        for name, f in FAULT_CATALOGUE.items():
+            starts = [s for s, _ in f["stretches"]]
+            values = set(np.round(x.loc[on, f["column"]].to_numpy(), 6))
+            if all(any(abs(s0 - s) < 0.25 for s in starts) for s0, _ in spans) and values <= set(f["forced to"]):
+                match.append(name)
+        rows[int(b)] = {"timing": timing[int(b)], "fault stretches (h)": ", ".join(f"{a:g}-{e:g}" for a, e in spans),
+                        "batch ends (h)": float(t[-1]), "fault type": " or ".join(match) if match else "no match",
+                        "controller output held at": ", ".join(f"{v:g}" for v in sorted(set(np.round(
+                            x.loc[on, FAULT_CATALOGUE[match[0]]["column"]], 6)))) if len(match) == 1 else ""}
+    out = pd.DataFrame(rows).T
+    out.index.name = "batch"
+    return out
+
+
+def detector_dataset(told: bool | str = False, raw: Path = RAW):
     """Faulty batches as runs (labels: the per-reading fault flag), the 30 line batches as
     val_normal (whole batches set the line), the 60 fit batches joined as the fit data.
-    told=True appends the stage (tenth of the batch) as a last column."""
+    told=True (or "stage") appends the stage (tenth of the batch) as a last column; told="strategy"
+    appends the control strategy's code instead (STRATEGY_CODE; notebook 11)."""
     from .data import Dataset, Run
+    extra = {True: "stage", "stage": "stage", "strategy": "strategy"}.get(told)
 
     def x(b):
-        return np.column_stack([b["X"], b["stage"]]) if told else b["X"]
+        if extra == "stage":
+            return np.column_stack([b["X"], b["stage"]])
+        if extra == "strategy":
+            return np.column_stack([b["X"], np.full(len(b["X"]), STRATEGY_CODE[b["strategy"]])])
+        return b["X"]
 
     bs, r = normal_batches(raw), roles(raw)
     fit = np.vstack([x(b) for b, role in zip(bs, r) if role == "fit"])
@@ -492,7 +538,8 @@ def detector_dataset(told: bool = False, raw: Path = RAW):
                 meta={"batch": b["batch"], "strategy": b["strategy"]}) for b in batches(raw) if b["faulty"]]
     val = [Run(f"batch{b['batch']}", x(b), np.zeros(len(b["X"]), int), fit, group="normal",
                meta={"batch": b["batch"], "strategy": b["strategy"]}) for b, role in zip(bs, r) if role == "line"]
-    return Dataset("indpensim_told" if told else "indpensim", runs, CHANNELS + (["stage"] if told else []), 720.0, val,
+    name = {"stage": "indpensim_told", "strategy": "indpensim_strategy"}.get(extra, "indpensim")
+    return Dataset(name, runs, CHANNELS + ([extra] if extra else []), 720.0, val,
                    calibration="matched", matched_start=0,
                    fit_lengths=[len(b["X"]) for b, role in zip(bs, r) if role == "fit"])
 
