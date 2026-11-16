@@ -15,6 +15,13 @@ dependencies = [
     "tqdm>=4.70.1",
 ]
 
+[project.optional-dependencies]
+# The deep models (adlab/deep.py). "deep" is PyTorch built for NVIDIA GPUs (CUDA 13.0);
+# "deep-cpu" is the same version without the GPU parts, much smaller, for CI. Pick one:
+#   uv sync --extra deep        or        uv sync --extra deep-cpu
+deep = ["torch>=2.14.1,<2.15"]
+deep-cpu = ["torch>=2.14.1,<2.15"]
+
 [dependency-groups]
 dev = [
     "ipykernel>=7.4.0",
@@ -26,3 +33,22 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["anomaly_lab"]
 testpaths = ["anomaly_lab/tests"]
+
+[tool.uv]
+conflicts = [[{ extra = "deep" }, { extra = "deep-cpu" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu130", extra = "deep" },
+    { index = "pytorch-cpu", extra = "deep-cpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
