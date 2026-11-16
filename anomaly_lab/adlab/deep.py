@@ -768,7 +768,9 @@ def table(res: dict) -> "pd.DataFrame":
     import pandas as pd
     from . import detectors as det
     s = _summary(res)
-    simple = [det.REGISTRY[k].name for k in SIMPLE if det.REGISTRY[k].name in s.index and k != "pca_twin"]
+    # Every detector that is not deep. Follow-up round: the PCA scored like the autoencoder (added after
+    # seeing results) now counts too; it is never the best, so no number here changed.
+    simple = [det.REGISTRY[k].name for k in SIMPLE if det.REGISTRY[k].name in s.index]
     best = s.loc[simple, "dr_at_1pct"].idxmax()
     rows = {}
     for key in DEEP:

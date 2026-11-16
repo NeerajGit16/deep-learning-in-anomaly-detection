@@ -549,3 +549,45 @@ def over_a_batch(runs: list, stages: list, channels: list, sensors: list, descri
         fig.suptitle(what, x=0.01, ha="left", fontsize=10)
     fig.tight_layout()
     return fig
+
+
+def place_labels(ax, xs, ys, texts, fontsize: float = 7.5, pad_px: float = 3.0):
+    """Label points without overlaps: each label starts just right of its point, then labels that would
+    overlap are pushed apart vertically (in screen space), and a thin line joins a moved label to its point."""
+    fig = ax.figure
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    to_pt = 72.0 / fig.dpi
+    anns = [ax.annotate(t, (x, y), xytext=(7, -3), textcoords="offset points", fontsize=fontsize, color=INK,
+                        va="center", ha="left") for x, y, t in zip(xs, ys, texts)]
+    start = [a.xyann for a in anns]
+    for _ in range(60):                                       # sweep until no two labels overlap
+        boxes = [a.get_window_extent(renderer) for a in anns]
+        points = ax.transData.transform(np.column_stack([xs, ys]))
+        moved = False
+        order = np.argsort([b.y0 for b in boxes])
+        for i_pos, i in enumerate(order):
+            for j in order[i_pos + 1:]:
+                bi, bj = boxes[i], boxes[j]
+                if bi.x1 + pad_px < bj.x0 or bj.x1 + pad_px < bi.x0:
+                    continue                                  # no horizontal overlap
+                need = bi.y1 + pad_px - bj.y0                 # how far j must go up to clear i
+                if need > 0:
+                    a_i, a_j = anns[i], anns[j]
+                    a_i.xyann = (a_i.xyann[0], a_i.xyann[1] - need / 2 * to_pt)
+                    a_j.xyann = (a_j.xyann[0], a_j.xyann[1] + need / 2 * to_pt)
+                    moved = True
+                    boxes = [a.get_window_extent(renderer) for a in anns]
+        for k, a in enumerate(anns):                          # keep labels off other points' markers
+            b = a.get_window_extent(renderer)
+            for m, (px, py) in enumerate(points):
+                if m != k and b.x0 - 4 < px < b.x1 + 4 and b.y0 - 4 < py < b.y1 + 4:
+                    a.xyann = (a.xyann[0], a.xyann[1] + (b.y1 - py + 6 if py < (b.y0 + b.y1) / 2 else -(py - b.y0 + 6)) * to_pt)
+                    moved = True
+        if not moved:
+            break
+    for a, s in zip(anns, start):
+        if abs(a.xyann[1] - s[1]) > 4:
+            ax.annotate("", a.xy, xytext=(a.xyann[0] - 1, a.xyann[1]), textcoords="offset points",
+                        arrowprops={"arrowstyle": "-", "color": INK2, "lw": 0.6, "shrinkA": 0, "shrinkB": 3})
+    return anns

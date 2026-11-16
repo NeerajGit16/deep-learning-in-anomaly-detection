@@ -27,8 +27,20 @@ SOURCE = {"pump": "notebook 04: the pump's 32 sessions (other/13 left out by the
           "tep6": "notebook 06: 30 runs, five rounds of whole runs",
           "etch": "notebook 07: 107 wafers, five rounds of whole wafers",
           "indpensim": "notebook 08: 90 batches, five rounds of whole batches"}
-STRAIGHT = ["Straight-link residual", "Kinked-link residual", "Straight-link residual, stage told"]
 FLEXIBLE = ["Curved-link residual"]
+SHORT = {"pump": "Pump", "plant": "Plant, one setting", "rig": "Flow rig", "tep6": "Plant, six modes",
+         "etch": "Etcher", "indpensim": "Penicillin"}
+
+
+def straight_side() -> list[str]:
+    """The "best straight-line" set: every detector that is not deep, except the curved-link residual (the
+    flexible model the third gap is about). Follow-up round: this now includes the straight forecaster and
+    the PCA scored like the autoencoder (added after seeing results), and the per-sensor checks, PCA,
+    isolation forest and the matrix profile; before, it held only the straight-link, kinked-link and
+    stage- or mode-told straight-link detectors."""
+    from . import deep
+    from . import detectors as det
+    return [det.REGISTRY[k].name for k in deep.SIMPLE if det.REGISTRY[k].name not in FLEXIBLE]
 
 
 def design(name: str) -> dict:
@@ -86,7 +98,7 @@ def gaps(name: str) -> dict:
     res = deep.report(REPORT[name])
     s = pd.DataFrame(res["summary"]).set_index("method")["dr_at_1pct"]
     deep_names = [det.REGISTRY[k].name for k in deep.DEEP if det.REGISTRY[k].name in s.index]
-    straight = [m for m in STRAIGHT if m in s.index]
+    straight = [m for m in straight_side() if m in s.index]
     flexible = [m for m in FLEXIBLE + deep_names if m in s.index]
     best_deep = s[deep_names].idxmax() if deep_names else None
     best_straight, best_flexible = s[straight].idxmax(), s[flexible].idxmax()
@@ -148,25 +160,35 @@ def chart(frame: pd.DataFrame):
     """The curved share against each gap, one panel per gap, every dataset a point with its ranges."""
     import matplotlib.pyplot as plt
     from . import plots
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.6), sharex=True)
+    short = {TITLES[k]: v for k, v in SHORT.items()}
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5.2), sharex=True)
     for ax, g in zip(axes, GAPS):
-        for i, (name, r) in enumerate(frame.iterrows()):
+        xs, ys, names = [], [], []
+        for name, r in frame.iterrows():
             x, y = float(r["curved share"]), float(r[f"{g}, points"])
             if np.isnan(y):
                 continue
             lo, hi = (float(v) for v in r[f"{g}, range"].split(" to "))
             ax.hlines(y, float(r["curved low"]), float(r["curved high"]), color=plots.BLUE, lw=1.5)
             ax.vlines(x, lo, hi, color=plots.BLUE, lw=1.5)
-            ax.plot(x, y, "o", color=plots.BLUE, ms=7, mec=plots.BG, mew=1.5)
-            ax.annotate(name, (x, y), textcoords="offset points", xytext=(6, 5 if i % 2 == 0 else -11), fontsize=7,
-                        color=plots.INK)                     # labels staggered up and down, so neighbours do not overlap
+            ax.plot(x, y, "o", color=plots.BLUE, ms=7, mec=plots.BG, mew=1.5, zorder=3)
+            xs.append(x), ys.append(y), names.append(short.get(name, name))
         for v in (-12, 12):
             ax.axhline(v, color=plots.ORANGE, lw=1, ls=(0, (3, 3)))
         ax.axhline(0, color=plots.INK2, lw=0.8)
         ax.axvline(3, color=plots.INK2, lw=0.8, ls=(0, (2, 3)))
+        ax.set_xlim(-6, 19)
         ax.set_xlabel("curved share on normal data, points (dotted: +3)")
-        ax.set_ylabel(f"{g}, points (dashed: 12-point margin)")
-        ax.set_title(g.capitalize(), fontsize=9)
+        ax.set_ylabel("gap, points (dashed: the 12-point margin)")
+        ax.set_title(g[0].upper() + g[1:], fontsize=10)
         ax.grid(color=plots.GRID, lw=0.6)
+        plots.place_labels(ax, xs, ys, names)
     fig.tight_layout()
+    return fig
+
+
+def save_chart(frame: pd.DataFrame, path: str = "results/across_datasets.png"):
+    """The chart as a picture for the README."""
+    fig = chart(frame)
+    fig.savefig(path, dpi=110, bbox_inches="tight")
     return fig
