@@ -212,3 +212,226 @@ def fault_spans(raw: Path = RAW) -> pd.DataFrame:
     out = pd.DataFrame(rows).T
     out.index.name = "batch"
     return out
+
+
+# ---------------------------------------------------------------- task B3: measures and detectors
+#
+# Fixed before anything was computed (notebook 08, section 4):
+#   columns   online measurements and controller outputs that move in normal batches (CHANNELS)
+#   unit      the batch; five staggered rounds by strategy, every round fitting on all three
+#   stage     ten equal slices of each batch's progress (0-10%, 10-20%, ...)
+#   detectors fit on 60 normal batches, alarm line on the other 30 (10 per strategy, which fit
+#             nothing), one line for all strategies; also a line from the recipe batches alone,
+#             because the faulty batches all follow the recipe
+
+CHANNELS = ["dissolved oxygen", "volume", "weight", "pH", "temperature", "CO2 off-gas", "oxygen uptake",
+            "O2 off-gas", "CO2 evolution",
+            "aeration", "sugar feed", "acid flow", "base flow", "cooling water", "heating water", "dilution water",
+            "head pressure", "broth dumped", "PAA flow", "oil flow"]
+LEFT_OUT_STILL = ["agitator", "ammonia shots"]           # controller outputs that never move in normal batches
+SLICES = 10
+STRATEGY_CODE = {"recipe": 0, "operator": 1, "APC": 2}
+LINE_POSITION = 2                                        # within each strategy, every third batch sets the line
+CACHE_NAME = "indpensim"
+STRATEGY_TOLD = "same moment, control strategy told to the straight model"
+INFO = pd.Series({name: what for name, _, what in COLUMNS})
+
+
+def stage_of(n: int, slices: int = SLICES) -> np.ndarray:
+    """Which tenth of a batch of n readings each reading is in (0 to 9)."""
+    return np.minimum(slices * np.arange(n) // n, slices - 1)
+
+
+def batches(raw: Path = RAW) -> list[dict]:
+    """Every batch: {"batch", "strategy", "X" (readings x CHANNELS), "time", "fault" (0/1 per reading),
+    "stage", "faulty"}, in batch order."""
+    d = readings(raw)
+    out = []
+    for b, x in d.groupby("batch", sort=True):
+        out.append({"batch": int(b), "strategy": x["strategy"].iloc[0], "X": x[CHANNELS].to_numpy(float),
+                    "time": x["time"].to_numpy(), "fault": x["fault"].to_numpy().astype(int),
+                    "stage": stage_of(len(x)), "faulty": bool(x["faulty batch"].max() == 1)})
+    return out
+
+
+def normal_batches(raw: Path = RAW) -> list[dict]:
+    return [b for b in batches(raw) if not b["faulty"]]
+
+
+def split(raw: Path = RAW, without: tuple = ()) -> dict:
+    """The 90 normal batches for the curvature measure, with rounds (batch.staggered_rounds by strategy)."""
+    from . import batch as B
+    bs = normal_batches(raw)
+    rounds = B.staggered_rounds([b["strategy"] for b in bs])
+    keep = [i for i, b in enumerate(bs) if b["batch"] not in without]
+    return {"runs": [bs[i]["X"] for i in keep], "stages": [bs[i]["stage"] for i in keep], "rounds": rounds[keep],
+            "names": [bs[i]["batch"] for i in keep], "strategies": [bs[i]["strategy"] for i in keep]}
+
+
+def split_table(raw: Path = RAW) -> pd.DataFrame:
+    from . import batch as B
+    s = split(raw)
+    return B.round_table(s["rounds"], s["strategies"], "strategy")
+
+
+def outlier_check(raw: Path = RAW):
+    from . import batch as B
+    s = split(raw)
+    return B.outlier_check(s["runs"], CHANNELS, s["names"])
+
+
+def _tag(without: tuple) -> str:
+    return CACHE_NAME + ("_without_" + "_".join(map(str, without)) if without else "")
+
+
+def measures(without: tuple = (), n_boot: int = 500, verbose: bool = True) -> dict:
+    """Headline, stage told, control strategy told and the four lag sets (each cached when done)."""
+    from . import batch as B, structure
+    s = split(without=without)
+    tag = _tag(without)
+    out = B.measures(s["runs"], s["stages"], s["rounds"], CHANNELS, tag, n_boot=n_boot, verbose=verbose)
+    codes = [np.full(len(r), STRATEGY_CODE[g]) for r, g in zip(s["runs"], s["strategies"])]
+    out[STRATEGY_TOLD] = structure.cached(f"{tag}__strategy_told", lambda: structure.curvature_by_run(
+        s["runs"], CHANNELS, folds=B.as_folds(s["runs"], s["rounds"]), modes=codes, n_boot=n_boot, verbose=verbose,
+        what=f"{tag}, strategy told"))
+    first = [B.SAME_MOMENT, B.TOLD, STRATEGY_TOLD]
+    progress.note(f"{tag}: pooled measures done")
+    return {k: out[k] for k in first + [k for k in out if k not in first]}
+
+
+def within_stages(without: tuple = (), n_boot: int = 500, verbose: bool = True) -> dict:
+    from . import batch as B
+    s = split(without=without)
+    return B.within_stages(s["runs"], s["stages"], s["rounds"], CHANNELS, _tag(without),
+                           label=lambda k: f"{10 * k}-{10 * k + 10}%", n_boot=n_boot, verbose=verbose)
+
+
+def between_table(without: tuple = ()) -> pd.DataFrame:
+    from . import batch as B
+    s = split(without=without)
+    return B.between_table(s["runs"], s["stages"], CHANNELS, s["strategies"], "strategies", INFO)
+
+
+def sensor_table(summary: dict) -> pd.DataFrame:
+    from . import batch as B
+    return B.sensor_table(summary, INFO)
+
+
+def pooled_readings(without: tuple = ()) -> tuple[np.ndarray, np.ndarray]:
+    s = split(without=without)
+    return np.vstack(s["runs"]), np.concatenate(s["stages"])
+
+
+def best_partner(sensors: list, without: tuple = ()) -> pd.DataFrame:
+    from . import batch as B
+    return B.best_partners(pooled_readings(without)[0], sensors, CHANNELS, INFO)
+
+
+def shape_clues(sensors: list, without: tuple = ()) -> pd.DataFrame:
+    from . import batch as B
+    return B.shape_clues(*pooled_readings(without), sensors, CHANNELS)
+
+
+def curved_scatter(sensors: list, without: tuple = (), every: int = 3):
+    from . import plots
+    X, stage = pooled_readings(without)
+    partners = best_partner(sensors, without)["best single predictor"]
+    return plots.scatter_by_stage(X, stage, list(zip(sensors, partners)), CHANNELS,
+                                  {c: f"{INFO[c]} ({c})" for c in CHANNELS},
+                                  {k: f"{10 * k}-{10 * k + 10}%" for k in range(SLICES)}, every=every)
+
+
+# ---------------------------------------------------------------- detectors
+
+def roles(raw: Path = RAW) -> list[str]:
+    """Each normal batch's role for the detectors: within each strategy, in batch order, every third
+    batch (the 3rd, 6th, ...) sets the alarm line and the others are fitted on (20 + 10 per strategy)."""
+    seen, out = {}, []
+    for b in normal_batches(raw):
+        k = seen.get(b["strategy"], 0)
+        out.append("line" if k % 3 == LINE_POSITION else "fit")
+        seen[b["strategy"]] = k + 1
+    return out
+
+
+def role_table(raw: Path = RAW) -> pd.DataFrame:
+    bs, r = normal_batches(raw), roles(raw)
+    rows = {s: {"fitted on": sum(b["strategy"] == s and x == "fit" for b, x in zip(bs, r)),
+                "set the alarm line": sum(b["strategy"] == s and x == "line" for b, x in zip(bs, r)), "scored": 0}
+            for s in STRATEGY_CODE}
+    rows["faulty (recipe)"] = {"fitted on": 0, "set the alarm line": 0, "scored": sum(b["faulty"] for b in batches(raw))}
+    return pd.DataFrame(rows).T
+
+
+def fault_kind_labels(raw: Path = RAW) -> dict:
+    """Faulty batches with the same fault timing (start, end and number of fault readings) get the same
+    letter: {batch: "A", ...}. The data does not say which fault each batch carries."""
+    spans = fault_spans(raw)
+    keys = {b: (row["fault starts (h)"], row["fault ends (h)"], row["readings with fault"]) for b, row in spans.iterrows()}
+    letters, out = {}, {}
+    for b in sorted(keys):
+        letters.setdefault(keys[b], "ABCDEFGHIJ"[len(letters)])
+        out[int(b)] = letters[keys[b]]
+    return out
+
+
+def detector_dataset(told: bool = False, raw: Path = RAW):
+    """Faulty batches as runs (labels: the per-reading fault flag), the 30 line batches as
+    val_normal (whole batches set the line), the 60 fit batches joined as the fit data.
+    told=True appends the stage (tenth of the batch) as a last column."""
+    from .data import Dataset, Run
+
+    def x(b):
+        return np.column_stack([b["X"], b["stage"]]) if told else b["X"]
+
+    bs, r = normal_batches(raw), roles(raw)
+    fit = np.vstack([x(b) for b, role in zip(bs, r) if role == "fit"])
+    kinds = fault_kind_labels(raw)
+    runs = [Run(f"batch{b['batch']}", x(b), b["fault"], fit, group=f"timing {kinds[b['batch']]}",
+                meta={"batch": b["batch"], "strategy": b["strategy"]}) for b in batches(raw) if b["faulty"]]
+    val = [Run(f"batch{b['batch']}", x(b), np.zeros(len(b["X"]), int), fit, group="normal",
+               meta={"batch": b["batch"], "strategy": b["strategy"]}) for b, role in zip(bs, r) if role == "line"]
+    return Dataset("indpensim_told" if told else "indpensim", runs, CHANNELS + (["stage"] if told else []), 720.0, val,
+                   calibration="matched", matched_start=0,
+                   fit_lengths=[len(b["X"]) for b, role in zip(bs, r) if role == "fit"])
+
+
+TOLD_KEY = "link_straight_told"
+
+
+def detector_methods() -> list[str]:
+    from . import detectors as det, run
+    return [m for m in run.METHODS if m in det.available()] + [TOLD_KEY]
+
+
+def score(verbose: bool = True):
+    from . import run
+    run.score_all([detector_dataset()], methods=[m for m in detector_methods() if m != TOLD_KEY], n_seeds=5,
+                  verbose=verbose)
+    run.score_all([detector_dataset(told=True)], methods=[TOLD_KEY], verbose=verbose)
+
+
+def detector_report(line: str = "all", n_boot: int = 1000, verbose: bool = True) -> dict:
+    """line="all": one line from all 30 line batches (the primary). line="recipe": the line from the
+    10 recipe line batches alone (the faulty batches follow the recipe)."""
+    from . import run, structure
+    score(verbose)
+    ds = detector_dataset()
+    keep = None if line == "all" else [r.meta["strategy"] == line for r in ds.val_normal]
+    return structure.cached(f"indpensim_report_{line}", lambda: run.report_dataset(
+        ds, detector_methods(), 5, n_boot, verbose=verbose, sources={TOLD_KEY: detector_dataset(told=True)},
+        line_keep=keep))
+
+
+def before_fault(line: str = "all") -> pd.DataFrame:
+    """False alarms on the faulty batches' own normal readings, before the fault and after it first starts."""
+    from . import run
+    ds = detector_dataset()
+    keep = None if line == "all" else [r.meta["strategy"] == line for r in ds.val_normal]
+    return run.false_alarms_around_fault(ds, detector_methods(), sources={TOLD_KEY: detector_dataset(told=True)},
+                                         line_keep=keep)
+
+
+def fault_kinds() -> pd.DataFrame:
+    from . import structure
+    return structure.cached("indpensim_kinds", lambda: structure.fault_types(detector_dataset(), saved=True))

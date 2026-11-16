@@ -277,7 +277,8 @@ def report(per_method: dict, fault_kinds: list, fault_groups: list, normal_group
                     d[b] = _above([sorted_faults[i] for i in idx], [fault_groups[i] for i in idx], lb).sum() / sizes[idx].sum()
                 draws[name] = d
         frame = pd.DataFrame(per_seed)
-        row = {"method": name, "seeds": len(seeds), **frame.mean().to_dict()}
+        row = {"method": name, "seeds": len(seeds), **frame.mean().to_dict(),
+               "dr_at_1pct_seed_sd": float(frame["dr_at_1pct"].std(ddof=0))}
         row["dr_ci90_low"], row["dr_ci90_high"] = map(float, np.nanquantile(draws[name], [0.05, 0.95]))
         summary.append(row)
     pairs = paired_differences(draws, point)
