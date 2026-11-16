@@ -47,6 +47,39 @@ Cranfield has two rows because of the outlier-run rule: run T3 holds more than h
 - **Cranfield:** at 1 false alarm in 100, the straight-link detector catches 0.38 of faulty readings (0.27 to 0.51) and the curved-link detector 0.37. The gap is 1.4 points, far under the 12-point margin: a tie. Both are ahead of the other six detectors over all runs.
 - **Six-mode plant:** detectors have not been run. They need faulty runs, which have not been downloaded (about 210 MB for one run per fault per mode).
 
-## Not decided here
+## Not decided here (as first written)
 
-Whether this is GO, NO-GO, or a reason to look at a different kind of plant. That call is left to the people making it.
+Whether this is GO, NO-GO, or a reason to look at a different kind of plant. That call was left to the people making it; it was made on 16 November (below).
+
+## Decision (16 November 2026)
+
+**Made by the user: not a go by the rule.** Neither dataset's curved share had its whole range above +3 points. The six-mode plant is at zero; Cranfield sits in the gap the rule does not cover (above zero, range reaching +3 only at its top end).
+
+**Instead, the project changes direction:**
+
+1. **No big simulator study for now.** A small one comes later, to show what a clean "yes" looks like.
+2. **A new main question:** does the curved share, measured on normal data alone, predict when flexible and deep models beat straight-line ones? It is tested on real datasets.
+3. **Deep models start now** (notebook 09).
+4. **IndPenSim replaces the Pensim benchmark.** Pensim needs a request form, and its licence forbids sharing the data, so others could not rerun the work. IndPenSim is public (CC BY 4.0).
+5. **Pretrained "foundation" models are put off** for now.
+
+**Why.** The six-mode plant was near zero (+0.07). Cranfield's +2.8 was mostly level shifts between settings (+1.1 once the straight model is told the setting). The metal etcher gave the first "yes" (+8.1, notebook 07), but only a small gain in detection: the curved-link detector caught 4.2 points more than the straight-link one, a tie under the 12-point margin.
+
+### Is Cranfield near the same "islands" limit as the six-mode plant?
+
+On the six-mode plant, almost all of each sensor's movement in the pooled data is the jump between modes. A straight model with many inputs can then hit every mode's average exactly, whatever shape the modes make, so the pooled curved share cannot show a curve between them (notebook 06, section 8). Cranfield has 20 flow settings and, for each sensor, 22 other sensors to predict it from. So in principle a straight model has enough freedom to place each setting's average too.
+
+The share of each sensor's movement that lies between the flow settings (runs T1 + T2, the readings taken at a setting; `cranfield.between_table()`):
+
+| | Cranfield (T1 + T2) | Cranfield (T1 to T3) | Six-mode plant |
+|---|---|---|---|
+| Sensors with over 99% of movement between settings or modes | 5 of 23 | 5 of 23 | 41 of 51 |
+| Sensors with over 90% | 11 of 23 | 9 of 23 | 45 of 51 |
+| Sensors with over half | 14 of 23 | 13 of 23 | 46 of 51 |
+| The middle sensor | 0.86 | 0.79 | 1.00 |
+
+Over 99% between settings: the water and air flows in, two valve positions and the pressure drop along the riser, which are the rig's settings and what follows directly from them. Nearly all within settings: the separator pressure PT501 (0.05), the water pump current, the top separator level and the temperatures.
+
+**How this affects reading the +2.8.** Cranfield is **about halfway** to the six-mode limit. For roughly half of its sensors, the pooled measure says little about how a link bends *between* settings, because the settings are islands a straight model can place one by one. For those sensors the +2.8 is a weak test of curvature between settings. It could miss a real bend there, and what it does find is not evidence of one. For the other half, the measure works as intended.
+
+What the +2.8 does contain is mostly level differences between visits to the same setting: telling the straight model the setting brings it down to +1.1. Measured inside each setting, it is about zero (notebook 05). Of the three sensors that gained over 10 points, two are island sensors: the flow out of the top separator (0.92 of its movement between settings) and the flow at the top of the riser (0.69). The third, the separator pressure PT501 (0.05), is not.

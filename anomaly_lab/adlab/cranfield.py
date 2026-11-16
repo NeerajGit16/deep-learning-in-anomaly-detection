@@ -179,3 +179,21 @@ def within_summary(table: pd.DataFrame) -> pd.Series:
                       "curved share, middle setting": table["curved share"].median(),
                       "curved share, most curved setting": table["curved share"].max(),
                       "settings with a curved share above 0.03": int((table["curved share"] > 0.03).sum())})
+
+
+def between_table(names: tuple = HEADLINE) -> pd.DataFrame:
+    """Per sensor: the share of its movement that is the gap between the flow settings' averages
+    (structure.between_share), over the readings taken at a setting; readings taken while a flow
+    was being changed are left out. As in notebook 06, section 8: near 1 means the sensor only
+    differs from setting to setting, and the pooled data is a set of separate islands."""
+    runs, labels = normal(names)
+    X, lab = np.vstack(runs), np.concatenate(labels)
+    at = lab != data.BETWEEN
+    out = pd.DataFrame({"share of movement between settings": structure.between_share(X[at], lab[at])},
+                       index=data.CRANFIELD_CHANNELS)
+    out.insert(0, "what it measures", data.CRANFIELD_INFO.set_index("sensor")["what it measures"].reindex(out.index)
+               if "sensor" in data.CRANFIELD_INFO else None)
+    out.index.name = "sensor"
+    out.attrs["settings"] = int(len(np.unique(lab[at])))
+    out.attrs["readings at a setting"] = int(at.sum())
+    return out.sort_values("share of movement between settings")

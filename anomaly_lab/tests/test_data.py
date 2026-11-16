@@ -183,3 +183,13 @@ def test_cranfield_normal_runs_each_pass_through_the_flow_settings():
     for X in D.cranfield_normal().values():
         label = D.flow_settings(X)
         assert len(set(label) - {D.BETWEEN}) >= 19 and 0.05 < (label == D.BETWEEN).mean() < 0.2
+
+
+@needs_cranfield
+def test_cranfield_islands_table():
+    from adlab import cranfield
+    t = cranfield.between_table()
+    share = t["share of movement between settings"]
+    assert t.attrs["settings"] == 20 and len(t) == 23
+    assert ((share >= -1e-9) & (share <= 1 + 1e-9)).all()
+    assert share["FT104"] > 0.99 and share["PT501"] < 0.2
