@@ -40,14 +40,19 @@ uv run pytest                            # checks everything works
 | `06_multimode_tep.ipynb` | The chemical plant run in six operating modes (Reinartz files): how curved its links are when the modes are pooled |
 | `07_metal_etch.ipynb` | A plasma etcher, wafer by wafer (a batch process): how curved its links are, and the detectors on its 21 faulty wafers |
 | `08_indpensim.ipynb` | A simulated penicillin fermentation, batch by batch (IndPenSim): how curved its links are, and the detectors on its 10 faulty batches |
+| `09_deep_models.ipynb` | Deep models (autoencoder, LSTM, GDN, USAD), each beside a simple twin, on all six datasets |
+| `10_across_datasets.ipynb` | All six datasets side by side: the curved share, the kinked share and three gaps in catching faults |
 | `adlab/data.py` | Loads SKAB, Tennessee Eastman (Braatz and Rieth files) and the Cranfield flow rig; plain-English sensor tables (`SKAB_INFO`, `TEP_INFO`, `CRANFIELD_INFO`) |
 | `adlab/explore.py` | Summary tables: faults per kind, how far each sensor moves, which sensors move together |
 | `adlab/plots.py` | All the figures |
-| `adlab/detectors.py` | The six simple detectors, plus the straight-link and curved-link residual detectors (and, for batch data, a straight-link one told the stage) |
+| `adlab/detectors.py` | The six simple detectors, plus the straight-link, curved-link and kinked-link residual detectors (and a straight-link one told the stage or mode) |
 | `adlab/structure.py` | Curvature measure and fault labelling |
 | `adlab/cranfield.py` | The curvature measures for the Cranfield rig, whose runs each pass through many flow settings |
 | `adlab/multimode.py` | Fetches and loads the six-mode Tennessee Eastman runs, and puts its curvature measures together |
 | `adlab/batch.py` | Batch processes: whole batches held out, the stage of a batch in place of the mode, and alarm lines set per group of batches |
+| `adlab/deep.py` | The deep models and their twins (PyTorch, optional), their training, self-checks and reports |
+| `adlab/across.py` | The table and chart across datasets, and the kinked share |
+| `adlab/download.py` | `python -m adlab.download all` fetches every dataset that needs no login |
 | `adlab/indpensim.py` | Downloads and loads the IndPenSim batches, says what each column is, and puts their measures and detectors together |
 | `adlab/etch.py` | Loads the metal etch wafers and puts their curvature measures and detectors together |
 | `adlab/remote.py` | Reads parts of a very large remote file without downloading all of it |
