@@ -31,6 +31,19 @@ def test_batches_strategies_and_faults():
 
 
 @needs_data
+def test_shifted_headers_are_explained_by_the_split_header():
+    """The header line has two fields too many (one header cut in three at its commas); the columns are
+    assigned by their values, and those values agree with the headers moved back two places."""
+    e = I.column_evidence()
+    if e.attrs["header fields"] is not None:
+        assert e.attrs["header fields"] - e.attrs["data fields"] == 2
+    assert e.loc[34, "header it belongs to"].startswith("Batch reference") and e.loc[35, "header it belongs to"] == "Batch ID"
+    assert e.loc[36, "header it belongs to"] == "Fault flag" and e.loc[37, "header it belongs to"].startswith("2400")
+    assert e.loc[34, "evidence"].endswith("True") and e.loc[36, "evidence"].endswith("True")
+    assert list(e.index) == list(range(I.PROCESS_COLUMNS))
+
+
+@needs_data
 def test_columns_that_never_move_are_marked():
     t = I.column_table()
     still = set(t.index[~t["moves in normal batches"].astype(bool)])

@@ -183,6 +183,107 @@ def check_labels(raw: Path = RAW) -> pd.DataFrame:
     return out
 
 
+SPLIT_HEADER = 33                    # "1- No Raman spec, 1-Raman spec recorded, 2-PAT control(PAT_ref)" was cut in three
+
+
+def raw_field_counts(raw: Path = RAW) -> dict:
+    """Fields in the CSV's header line and in its first data line (None if the CSV is not unpacked)."""
+    import csv
+    path = Path(raw) / FOLDER / CSV
+    if not path.exists():
+        return {"header fields": None, "data fields": None, "headers": None}
+    with open(path, newline="") as f:
+        r = csv.reader(f)
+        header, first = next(r), next(r)
+    return {"header fields": len(header), "data fields": len(first), "headers": header}
+
+
+def column_evidence(raw: Path = RAW) -> pd.DataFrame:
+    """Every process column: the header the file puts over it, the header it belongs to, the name used here,
+    and the evidence from its values (normal batches 1-90 unless said).
+
+    The file's header line has two more fields than its data lines: the header of column 33 contains two
+    commas and was cut into three, so from column 33 on each header sits two places to the right of its data.
+    The header a column belongs to is therefore the one two places further right.
+    """
+    d, counts = readings(raw), raw_field_counts(raw)
+    headers = counts["headers"] or list(process(raw).columns)
+    n = d[d["batch"] <= 90]
+    t = d["time"].to_numpy()
+    restarts = np.r_[0, np.flatnonzero(np.diff(t) < 0) + 1]
+    count = np.repeat(np.arange(1, len(restarts) + 1), np.diff(np.r_[restarts, len(t)]))
+    st = statistics(raw)
+    per_batch = d.groupby("batch")
+
+    def corr(a, b, frame=n):
+        x = frame[[a, b]].dropna()
+        return float(np.corrcoef(x[a], x[b])[0, 1])
+
+    def batches_where(mask):
+        u = np.unique(d.loc[mask, "batch"])
+        return f"{u.min()}-{u.max()} ({len(u)} batches)" if len(u) else "none"
+
+    dumped = n["broth dumped"] < 0
+    dv = n["volume"].diff()
+    special = {
+        "time": f"rises in steps of {np.unique(np.round(np.diff(t)[np.diff(t) > 0], 3))[0]} h and starts again at "
+                f"{np.unique(t[restarts])[0]} h {len(restarts)} times, once per batch",
+        "agitator": "always 100 RPM: the agitator is never moved",
+        "broth dumped": f"never above 0; when it is below 0 the volume falls at the next reading "
+                        f"{100 * float((dv.shift(-1)[dumped] < 0).mean()):.0f}% of the time",
+        "penicillin": f"rises through each batch (correlation with time {corr('penicillin', 'time'):.2f})",
+        "weight": f"follows the volume (correlation {corr('volume', 'weight'):.3f}; about "
+                  f"{float(np.median(n['weight'] / n['volume'])):.2f} kg per litre)",
+        "temperature": "297-301 K, about 25 °C",
+        "CO2 off-gas": f"moves with the CO2 evolution rate (correlation {corr('CO2 off-gas', 'CO2 evolution'):.2f})",
+        "oxygen uptake": f"moves against the O2 in the off-gas (correlation {corr('oxygen uptake', 'O2 off-gas'):.2f})",
+        "O2 off-gas": "0.15-0.23: a fraction, about 19%, though the header says %",
+        "penicillin offline": f"agrees with the penicillin state where both exist (correlation "
+                              f"{corr('penicillin offline', 'penicillin'):.3f}): a lab sample of it",
+        "CO2 evolution": f"moves with the CO2 in the off-gas (correlation {corr('CO2 off-gas', 'CO2 evolution'):.2f})",
+        "ammonia shots": "always 0",
+        "acid flow": f"acid flows when the pH is high: median pH {n.loc[n['acid flow'] > 0, 'pH'].median():.2f} while it "
+                     f"flows, {n.loc[n['acid flow'] == 0, 'pH'].median():.2f} otherwise",
+        "base flow": f"more base when the pH is low (correlation with pH {corr('base flow', 'pH'):.2f})",
+        "substrate": f"high in the first 5 hours (median {n.loc[n['time'] <= 5, 'substrate'].median():.2f} g/L), "
+                     f"then near 0 (median {n.loc[n['time'] > 20, 'substrate'].median():.4f}): the sugar is eaten as fed",
+        "volume": "under the vessel's 100,000 L; rises while dilution water flows "
+                  f"(median {n.groupby('batch')['volume'].diff()[n['dilution water'] > 0].median():.0f} L per reading)",
+    }
+    for lab in ("PAA offline", "NH3 offline", "biomass offline", "viscosity offline"):
+        special[lab] = "a value only every 10-12 hours, missing otherwise: a lab sample"
+    special = {**special,
+        "fault": f"0 in every reading of batches 1-90; 1 in some readings of batches {batches_where(d['fault'] == 1)}",
+        "operator": f"1 exactly in batches {batches_where(d['operator'] == 1)}: the operator-run batches",
+        "PAT": f"2 exactly in batches {batches_where(d['PAT'] == 2)}: the Raman-controlled batches; 1 otherwise",
+        "batch": f"equals the batch count (how many times the time has restarted): "
+                 f"{bool((d['batch'] == count).all())}",
+        "batch again": f"equals the batch count as well: {bool((d['batch again'] == count).all())}",
+        "faulty batch": f"constant within each batch; 1 exactly in batches {batches_where(d['faulty batch'] == 1)}; "
+                        f"agrees with the fault column of the statistics file for all 100 batches: "
+                        f"{bool((per_batch['faulty batch'].max().to_numpy() == st.iloc[:, -1].to_numpy()).all())}",
+        "Raman 1": f"0 to {d['Raman 1'].max():,.0f}, the scale of the Raman intensities",
+        "Raman 2": f"moves with Raman 1 (correlation {corr('Raman 1', 'Raman 2', d):.5f}): the next wavenumber",
+    }
+    rows = {}
+    for i, (name, role, what) in enumerate(COLUMNS):
+        over = headers[i]
+        belongs = headers[i + 2] if i >= SPLIT_HEADER else headers[i]
+        if i >= SPLIT_HEADER:
+            belongs = {33: "PAT ref (1- No Raman spec, 1-Raman spec recorded, 2-PAT control)"}.get(i, belongs)
+            belongs = {37: "2400 (first Raman wavenumber)", 38: "2399"}.get(i, belongs)
+        x = (n if i < 31 else d)[name].dropna()
+        values = f"{x.min():.4g} to {x.max():.4g}" + (f", {100 * n[name].isna().mean():.0f}% missing"
+                                                      if n[name].isna().any() else "") + (" (all batches)" if i >= 31 else "")
+        rows[i] = {"header over it in the file": over.strip(), "header it belongs to": belongs.strip(),
+                   "name here": name, "role here": role, "values": values,
+                   "evidence": special.get(name, "header not shifted (it is before column 33); values fit its quantity and unit")}
+    out = pd.DataFrame(rows).T
+    out.index.name = "column"
+    out.attrs.update({k: v for k, v in counts.items() if k != "headers"})
+    return out
+
+
 def column_table(raw: Path = RAW) -> pd.DataFrame:
     """Every column: its role, what it is, and whether it moves within the normal batches (1-90)."""
     d = readings(raw)
