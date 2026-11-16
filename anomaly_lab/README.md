@@ -54,6 +54,7 @@ uv run pytest                            # checks everything works
 | `adlab/progress.py` | Progress bars for the slow steps, and a progress log for jobs running in the background |
 | `tests/` | Checks that the code and data behave as expected |
 | `results/` | Saved scores, tables and figures |
+| `results/decision_point.md` | The curvature numbers from notebooks 05 and 06 set against the go/no-go rule |
 
 ## Slow steps
 
