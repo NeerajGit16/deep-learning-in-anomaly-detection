@@ -591,3 +591,68 @@ def place_labels(ax, xs, ys, texts, fontsize: float = 7.5, pad_px: float = 3.0):
             ax.annotate("", a.xy, xytext=(a.xyann[0] - 1, a.xyann[1]), textcoords="offset points",
                         arrowprops={"arrowstyle": "-", "color": INK2, "lw": 0.6, "shrinkA": 0, "shrinkB": 3})
     return anns
+
+
+def scatter_with_faults(X: np.ndarray, stage: np.ndarray, Xf: np.ndarray, pairs: list, names: list,
+                        describe: dict | None = None, stage_names: dict | None = None, every: int = 1, across: int = 2,
+                        fault_label: str = "faulty readings"):
+    """scatter_by_stage, with chosen faulty readings drawn on top as orange crosses."""
+    fig = scatter_by_stage(X, stage, pairs, names, describe, stage_names, every, across)
+    rng = np.random.default_rng(1)
+    for ax, (target, partner) in zip([a for a in fig.axes if a.get_visible()], pairs):
+        ax.scatter(_spread(Xf[:, names.index(partner)], rng), _spread(Xf[:, names.index(target)], rng), s=16,
+                   marker="x", color=ORANGE, lw=1.0, label=fault_label, zorder=3)
+        ax.legend(fontsize=7, markerscale=2, frameon=False, loc="best")
+    return fig
+
+
+def two_views(views: dict, stage: np.ndarray, stage_names: dict | None = None, every: int = 1,
+              fault_label: str = "faulty readings"):
+    """Side-by-side 2-D views ({title: (normal 2-D, faulty 2-D)}), normal readings coloured by stage, faulty ones
+    as orange crosses."""
+    stage_names = stage_names or {}
+    keep = np.arange(0, len(stage), every)
+    levels = sorted(np.unique(stage))
+    colours = stage_colours(len(levels))
+    fig, axes = plt.subplots(1, len(views), figsize=(5.4 * len(views), 4.6), squeeze=False)
+    for ax, (title, (normal, faulty)) in zip(axes.ravel(), views.items()):
+        st = np.asarray(stage)[keep]
+        for level, colour in zip(levels, colours):
+            pick = st == level
+            ax.scatter(normal[keep][pick, 0], normal[keep][pick, 1], s=4, color=colour, lw=0, alpha=0.6, rasterized=True,
+                       label=stage_names.get(level, str(level)))
+        ax.scatter(faulty[:, 0], faulty[:, 1], s=16, marker="x", color=ORANGE, lw=1.0, label=fault_label, zorder=3)
+        ax.set_title(_wrap(title), fontsize=9)
+        ax.set_xlabel("first direction", fontsize=8)
+        ax.set_ylabel("second direction", fontsize=8)
+        ax.grid(color=GRID, lw=0.6)
+        ax.tick_params(labelsize=7)
+        ax.legend(fontsize=7, markerscale=2, frameon=False, loc="best", ncol=2)
+    fig.tight_layout()
+    return fig
+
+
+def over_time_with_faults(normal: list, faulty: list, channels: list, names: list, describe: dict | None = None,
+                          shade: tuple | None = None, across: int = 3, faulty_names: list | None = None):
+    """Each chosen channel over time: normal batches as thin blue lines, faulty batches in orange.
+    normal / faulty: lists of (hours, readings) pairs. shade: an (from, to) stretch of hours to shade."""
+    describe = describe or {}
+    rows = -(-len(channels) // across)
+    fig, axes = plt.subplots(rows, across, figsize=(4.6 * across, 3.0 * rows + 0.3), squeeze=False)
+    for ax in axes.ravel()[len(channels):]:
+        ax.set_visible(False)
+    for ax, c in zip(axes.ravel(), channels):
+        j = names.index(c)
+        for k, (t, X) in enumerate(normal):
+            ax.plot(t, X[:, j], color=BLUE, lw=0.6, alpha=0.35, label="normal recipe batches" if k == 0 else None)
+        for k, (t, X) in enumerate(faulty):
+            ax.plot(t, X[:, j], color=ORANGE, lw=1.1, label=(faulty_names[k] if faulty_names else "faulty batches" if k == 0 else None))
+        if shade:
+            ax.axvspan(*shade, color=GRID, alpha=0.6, lw=0)
+        ax.set_title(_wrap(describe.get(c, c), 46), fontsize=9)
+        ax.set_xlabel("hours into the batch", fontsize=8)
+        ax.grid(color=GRID, lw=0.6)
+        ax.tick_params(labelsize=7)
+    axes.ravel()[0].legend(fontsize=7, frameon=False, loc="best")
+    fig.tight_layout()
+    return fig
