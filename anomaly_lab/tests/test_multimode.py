@@ -103,3 +103,28 @@ def test_sensors_curved_inside_a_mode_are_listed_with_their_best_partner():
     assert row["best single predictor"] in D.TEP_CHANNELS and row["best single predictor"] != "XMV(5)"
     assert 0.5 < row["share of time at its highest value"] < 1          # the valve sits at its stop most of the time
 
+
+
+needs_faults = pytest.mark.skipif(not all((D.RAW / MM.FOLDER / f"mode{m}_faults.npz").exists() for m in MM.MODES),
+                                  reason="needs the multi-mode faulty runs (multimode.download_faults)")
+
+
+@needs_faults
+def test_one_full_strength_run_of_every_fault_in_every_mode():
+    for m in MM.MODES:
+        runs, idx = MM.faulty(m), MM.faults_index(m)
+        assert sorted(runs) == list(MM.FAULTS)
+        assert all(e["strength"] == 1.0 for e in idx["faults"])
+        assert all(r.shape[1] == 52 and np.isfinite(r).all() for r in runs.values())
+        assert all(len(r) <= 2000 for r in runs.values())
+    for m in (1, 4):                       # mode 4's runs are stored without the extra reading at time 0
+        times = MM.alignment_check(m)
+        assert times["fault-free first, last"] == times["faulty first, last"] == (0.05, 100.0)
+
+
+@needs_faults
+def test_no_faulty_run_is_a_twin_of_a_normal_run():
+    """A faulty run that shares random numbers with a normal run would, before its fault, be a copy
+    of a run the detectors may be fitted on."""
+    t = MM.twin_check()
+    assert (t["faulty runs identical to a normal run before the fault"] == 0).all()

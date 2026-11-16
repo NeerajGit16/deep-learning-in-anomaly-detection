@@ -24,13 +24,15 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def http_fetcher(url: str, timeout: float = 120.0, tries: int = 4):
+def http_fetcher(url: str, timeout: float = 120.0, tries: int = 6, pause: float = 2.0):
     """A function fetch(start, end) -> bytes for `url` (both ends included), and the file's size.
 
     The download address first redirects to a signed address at the storage server that is
     valid for a while. That address is looked up once and reused, and looked up again if the
-    storage server starts refusing it.
+    storage server starts refusing it. Between tries the wait doubles (pause, 2 x pause, ...),
+    so a server that refuses for a moment is not hammered.
     """
+    import time
     state = {"direct": None}
     opener = urllib.request.build_opener(_NoRedirect)
 
@@ -46,10 +48,12 @@ def http_fetcher(url: str, timeout: float = 120.0, tries: int = 4):
     def get(start: int, end: int):
         last = None
         for attempt in range(tries):
-            if state["direct"] is None:
-                resolve()
-            req = urllib.request.Request(state["direct"], headers={"User-Agent": AGENT, "Range": f"bytes={start}-{end}"})
+            if attempt:
+                time.sleep(pause * 2 ** (attempt - 1))
             try:
+                if state["direct"] is None:
+                    resolve()
+                req = urllib.request.Request(state["direct"], headers={"User-Agent": AGENT, "Range": f"bytes={start}-{end}"})
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     if r.status != 206:
                         raise OSError(f"the server ignored the byte range (status {r.status}); not downloading the whole file")

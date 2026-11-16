@@ -142,6 +142,157 @@ def download(raw: Path = data.RAW, modes: tuple = MODES, together: int = 3, verb
     return raw / FOLDER
 
 
+# ---------------------------------------------------------------- faulty runs
+
+FAULTS = range(1, 29)               # IDV(1) to IDV(28)
+FULL = 100                          # full strength (the files also hold 75, 50 and 25%)
+
+
+def _fault_entry(h5, mode: int, fault: int) -> dict | None:
+    """Where the first stored full-strength run of one fault sits in the file.
+
+    Runs that finished are under SimulationCompleted. If a fault always shuts the simulated plant
+    down at full strength, its runs are under SimulationStopped and are shorter; that run is taken.
+    """
+    for part in ("SimulationCompleted", "SimulationStopped"):
+        group = f"Mode{mode}/SingleFault/{part}/IDV{fault}/Mode{mode}_IDVInfo_{fault}_{FULL}"
+        if group not in h5:
+            continue
+        # Asking for Run1 by name is quick; listing all 200 stored runs costs many slow reads.
+        if f"{group}/Run1" in h5:
+            runs = ["Run1"]
+        else:
+            runs = sorted(h5[group].keys(), key=lambda r: int(r[3:]))
+        g = h5[f"{group}/{runs[0]}"]
+        d = g["processdata"]
+        if d.chunks is not None or d.compression is not None or d.dtype != np.dtype("<f8"):
+            raise OSError(f"{group}/{runs[0]}/processdata is not stored as one plain block of numbers")
+        idv = np.asarray(g["idv_init"][()])
+        return {"path": f"{group}/{runs[0]}", "fault": fault, "stopped": part == "SimulationStopped",
+                "offset": int(d.id.get_offset()), "shape": [int(n) for n in d.shape],
+                "strength": float(idv[1, fault - 1]), "starts at hour": float(idv[2, fault - 1])}
+    return None
+
+
+def _fault_paths(raw: Path, mode: int) -> dict:
+    base = raw / FOLDER
+    return {"runs": base / f"mode{mode}_faults.npz", "index": base / f"mode{mode}_faults_index.json"}
+
+
+def download_faults_mode(mode: int, raw: Path = data.RAW, threads: int = 2, verbose: bool = False) -> dict:
+    """Fetch one full-strength run of each of the 28 faults of one mode and save them.
+
+    Writes mode<N>_faults.npz (one array per fault, readings x 54 columns) and
+    mode<N>_faults_index.json. Nothing if they are already there. Returns the index.
+    """
+    import h5py
+    from .remote import RangeFile, http_fetcher
+
+    out = _fault_paths(raw, mode)
+    if all(p.exists() for p in out.values()):
+        return json.loads(out["index"].read_text())
+    out["index"].parent.mkdir(parents=True, exist_ok=True)
+    remote = RangeFile(url(mode), block=1 << 16, limit=2 << 30)
+    with h5py.File(remote, "r") as h5:
+        entries = [e for e in (_fault_entry(h5, mode, k) for k in progress.track(
+            FAULTS, f"mode {mode}: finding faulty runs", verbose=verbose)) if e is not None]
+    fetch, _ = http_fetcher(url(mode))
+    with ThreadPoolExecutor(threads) as pool:
+        blocks = list(progress.track(pool.map(lambda e: read_block(fetch, e), entries),
+                                     f"mode {mode}: downloading faulty runs", total=len(entries), verbose=verbose))
+    np.savez(out["runs"], **{f"fault_{e['fault']}": b for e, b in zip(entries, blocks)})
+    index = {"mode": mode, "faults": entries,
+             "megabytes_transferred": round((remote.fetched_bytes + sum(b.nbytes for b in blocks)) / 1e6, 1)}
+    out["index"].write_text(json.dumps(index, indent=1))
+    progress.note(f"mode {mode}: saved {len(entries)} faulty runs, {index['megabytes_transferred']} MB transferred")
+    return index
+
+
+def download_faults(raw: Path = data.RAW, modes: tuple = MODES, together: int = 3, verbose: bool = True) -> Path:
+    """One full-strength run of each fault in each mode (168 runs, about 0.2 GB), `together` modes at once."""
+    todo = [m for m in modes if not all(p.exists() for p in _fault_paths(raw, m).values())]
+    if todo:
+        with ProcessPoolExecutor(min(together, len(todo))) as pool:
+            jobs = [pool.submit(download_faults_mode, m, raw) for m in todo]
+            for job in progress.track(as_completed(jobs), "downloading faulty runs (modes done)", total=len(jobs),
+                                      verbose=verbose, leave=True):
+                job.result()
+    return raw / FOLDER
+
+
+def faults_index(mode: int, raw: Path = data.RAW) -> dict:
+    return json.loads(_fault_paths(raw, mode)["index"].read_text())
+
+
+def faulty(mode: int, raw: Path = data.RAW) -> dict:
+    """A mode's faulty runs: {fault number: (readings, 52 sensors)}, lined up with the fault-free
+    runs: reading i is at 3 x (i + 1) minutes. Most runs are stored with an extra first reading at
+    time 0, which is dropped; mode 4's are stored without it."""
+    if not _fault_paths(raw, mode)["runs"].exists():
+        download_faults(raw, (mode,))
+    with np.load(_fault_paths(raw, mode)["runs"]) as z:
+        return {int(k.split("_")[1]): _sensors(z[k][1:] if z[k][0, 0] == 0 else z[k]) for k in z.files}
+
+
+def faulty_table(raw: Path = data.RAW) -> pd.DataFrame:
+    """One row per mode: faulty runs fetched, how many were stopped early (the plant shut down),
+    their lengths, the fault start hours and strengths recorded in each run (idv_init), and
+    megabytes transferred."""
+    rows = {}
+    for m in MODES:
+        idx = faults_index(m, raw)
+        e = idx["faults"]
+        stopped = [x["fault"] for x in e if x["stopped"]]
+        rows[f"mode {m}"] = {"faulty runs": len(e), "stopped early (faults)": ", ".join(map(str, stopped)) or "none",
+                             "readings, fewest": min(len(r) for r in faulty(m, raw).values()),
+                             "readings, most": max(len(r) for r in faulty(m, raw).values()),
+                             "fault starts at hour": ", ".join(f"{h:g}" for h in sorted({x["starts at hour"] for x in e})),
+                             "strength": ", ".join(f"{v:g}" for v in sorted({x["strength"] for x in e})),
+                             "megabytes transferred": idx["megabytes_transferred"]}
+    return pd.DataFrame(rows).T
+
+
+def twin_check(raw: Path = data.RAW) -> pd.DataFrame:
+    """Do the faulty runs share random numbers with a mode's 5 normal runs, or with each other?
+
+    The simulation is fixed once its random numbers are: two runs with the same random numbers
+    are identical until the fault starts. So the stretch before each fault (hours 0 to 29) is
+    compared with the same stretch of each of the mode's 5 distinct fault-free runs and of the
+    mode's other faulty runs. "identical" means equal to the last digit; "closest" is the
+    smallest largest gap, in units of each sensor's spread in the fault-free runs.
+    """
+    rows = {}
+    for m in MODES:
+        normal = fault_free(m)[list(DISTINCT)]
+        runs = faulty(m, raw)
+        before = int(round(CHANGE_AT_HOUR * 20)) - 1                 # readings at 3, 6, ... minutes up to hour 29.95
+        sd = normal[:, :before].reshape(-1, 52).std(0)
+        sd = np.where(sd > 0, sd, 1.0)
+        keys = sorted(runs)
+        pre = {k: runs[k][:before] for k in keys}
+        same_normal = sum(any(np.array_equal(pre[k], n[:before]) for n in normal) for k in keys)
+        gap_normal = min(float((np.abs(pre[k] - n[:before]) / sd).max()) for k in keys for n in normal)
+        pairs = [(a, b) for i, a in enumerate(keys) for b in keys[i + 1:]]
+        same_pairs = sum(np.array_equal(pre[a], pre[b]) for a, b in pairs)
+        gap_pairs = min(float((np.abs(pre[a] - pre[b]) / sd).max()) for a, b in pairs)
+        rows[f"mode {m}"] = {"faulty runs identical to a normal run before the fault": same_normal,
+                             "closest to a normal run (largest gap, spreads)": gap_normal,
+                             "pairs of faulty runs identical before the fault": same_pairs,
+                             "of pairs": len(pairs),
+                             "closest two faulty runs (largest gap, spreads)": gap_pairs}
+    return pd.DataFrame(rows).T
+
+
+def alignment_check(mode: int = 1, raw: Path = data.RAW) -> dict:
+    """The time (column 0) of the first and last stored reading of a fault-free and a faulty run,
+    after loading, in hours: both should start at 0.05 (3 minutes) and end at 100."""
+    with np.load(_fault_paths(raw, mode)["runs"]) as z:
+        f = max((z[k][:, 0] for k in z.files), key=len)          # a run that did not stop early
+        f = f[1:] if f[0] == 0 else f
+    n = np.load(_paths(raw, mode)["normal"])[0][:, 0]
+    return {"fault-free first, last": (float(n[0]), float(n[-1])), "faulty first, last": (float(f[0]), float(f[-1]))}
+
+
 # ---------------------------------------------------------------- loading
 
 def index(mode: int, raw: Path = data.RAW) -> dict:
