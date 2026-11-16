@@ -1,0 +1,23 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install the project (core, plus CPU-only PyTorch for the deep-model tests)
+        run: uv sync --extra deep-cpu
+
+      - name: Run the tests (tests that need downloaded data are skipped, with the reason shown)
+        run: uv run --extra deep-cpu pytest -q -rs
