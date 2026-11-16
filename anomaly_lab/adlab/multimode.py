@@ -355,10 +355,8 @@ def between_modes_share() -> pd.DataFrame:
     average is the same in every mode (a level held at one set-point, say) and all its movement
     is wander inside the modes.
     """
-    X, mode = readings()
-    total = X.var(0)
-    inside = sum(X[mode == m].var(0) * (mode == m).mean() for m in MODES)
-    share = np.where(total > 0, 1 - inside / np.where(total > 0, total, 1.0), np.nan)
+    from . import structure
+    share = structure.between_share(*readings())
     out = pd.DataFrame({"what it measures": list(data.TEP_INFO["what it measures"]),
                         "share of movement that is between modes": share}, index=data.TEP_CHANNELS)
     out.index.name = "sensor"

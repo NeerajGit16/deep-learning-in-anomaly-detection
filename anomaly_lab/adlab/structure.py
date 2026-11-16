@@ -398,6 +398,24 @@ def movement_by_run(runs: list, channels: list[str], names: list | None = None) 
     return out
 
 
+def between_share(X: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    """Per sensor: the share of its movement that is the gap between the groups' averages.
+
+    labels gives the group of every reading (an operating mode, a stage of a batch). 1 means the
+    sensor only differs from group to group and barely moves inside one; 0 means its average is
+    the same in every group and all its movement is inside the groups. nan for a sensor that
+    never moves.
+
+    Why it matters: if nearly all movement is between a handful of groups, the pooled data is a
+    few tight islands, and a straight model with enough inputs can hit every island exactly
+    whatever shape they make. The pooled curved share then cannot show a curve between groups.
+    """
+    X, labels = np.asarray(X, float), np.asarray(labels)
+    total = X.var(0)
+    inside = sum(X[labels == g].var(0) * (labels == g).mean() for g in np.unique(labels))
+    return np.where(total > 0, 1 - inside / np.where(total > 0, total, 1.0), np.nan)
+
+
 LAG_SETS = {"same moment only": (), "+ 1 back": (1,), "+ 1, 2 back": (1, 2), "+ 1, 2, 5 back": (1, 2, 5),
             "+ 1, 2, 5, 10 back": (1, 2, 5, 10)}
 
@@ -529,16 +547,22 @@ def fault_types(ds: Dataset, far: float = 0.01, caught: float = 0.5, few: int = 
     out = pd.DataFrame(cols)
     moved = pd.Series(sensors_moved(ds, far, calibration=mode), index=groups).groupby(level=0, sort=False).mean()
     out["sensors moved"] = moved.reindex(out.index).round(1)
-    others = out.drop(columns=["level checks", "sensors moved"]).max(axis=1)
+    out["kind"] = kind_of_fault(out, caught, few)
+    out.index.name = "kind of fault"
+    return out
+
+
+def kind_of_fault(table: pd.DataFrame, caught: float = 0.5, few: int = 3) -> list[str]:
+    """The label of fault_types for every row of a table with columns "level checks", "sensors moved"
+    and one column per other family of checks (catch rates)."""
+    others = table.drop(columns=["level checks", "sensors moved"]).max(axis=1)
 
     def kind(row, other):
         if row["level checks"] >= caught:
             return "single sensor" if row["sensors moved"] <= few else "many sensors"
         return "hidden from level checks" if other >= caught else "hard for all"
 
-    out["kind"] = [kind(row, others[i]) for i, row in out.iterrows()]
-    out.index.name = "kind of fault"
-    return out
+    return [kind(row, others[i]) for i, row in table.iterrows()]
 
 
 # ---------------------------------------------------------------- saved results, so notebooks rerun fast

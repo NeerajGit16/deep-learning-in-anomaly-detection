@@ -56,8 +56,32 @@ def note(message: str) -> None:
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {message}\n")
 
 
+_awake = 0     # how many tracked loops are running now
+
+
+def stay_awake(on: bool) -> None:
+    """On Windows, ask the computer not to go to sleep by itself while a tracked loop is running.
+
+    Loops inside loops are counted, so the request is dropped only when the outermost one ends.
+    It stops the idle timer only: closing the lid or choosing Sleep still puts the computer to
+    sleep. The screen may still switch off. Does nothing on other systems.
+    """
+    global _awake
+    _awake = max(0, _awake + (1 if on else -1))
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        continuous, system_required = 0x80000000, 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(continuous | (system_required if _awake else 0))
+    except Exception:           # never let this stop the real work
+        pass
+
+
 def track(items, what: str, total: int | None = None, verbose: bool = True, leave: bool = False):
     """Go through `items`, showing a progress bar and writing to the progress log.
+
+    While the loop runs (outside the tests), Windows is asked not to go to sleep (stay_awake).
 
     what     a few words saying what is being done, shown next to the bar and in the log
     total    how many items there are, if `items` has no length
@@ -79,6 +103,7 @@ def track(items, what: str, total: int | None = None, verbose: bool = True, leav
         bar = tqdm(total=total, desc=what, leave=leave)
     start = last = time.time()
     done = 0
+    stay_awake(True)
     try:
         for item in items:
             yield item
@@ -95,5 +120,6 @@ def track(items, what: str, total: int | None = None, verbose: bool = True, leav
                 else:
                     note(f"{what} | {done} done | {nice_time(now - start)} so far")
     finally:
+        stay_awake(False)
         if bar is not None:
             bar.close()

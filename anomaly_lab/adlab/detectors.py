@@ -300,7 +300,13 @@ class LinkResidual(Detector):
         p = m1.predict(A)
         return p if m2 is None else p + m2.predict(A)
 
+    def _separate(self, X):
+        """The sensor columns of X, and any extra input columns: given to every sensor's model,
+        never predicted and never scored. Plain link detectors have none."""
+        return X, np.zeros((len(X), 0))
+
     def fit(self, X):
+        X, E = self._separate(X)
         super().fit(X)
         Z = self._z(X)
         self.live_ = X.std(0) > 1e-9
@@ -308,22 +314,23 @@ class LinkResidual(Detector):
         for j in np.flatnonzero(self.live_):
             others = self.live_.copy()
             others[j] = False
-            self.models_[j] = (others, *self._fit_pair(Z[:, others], Z[:, j]))
-        err = Z - self._held_out(Z)
+            self.models_[j] = (others, *self._fit_pair(np.hstack([Z[:, others], E]), Z[:, j]))
+        err = Z - self._held_out(Z, E)
         now, avg = np.abs(err), np.abs(_trailing_mean(err, self.window))
         self.ref_now_ = np.maximum(np.quantile(now, 0.99, axis=0), 1e-9)
         self.ref_avg_ = np.maximum(np.quantile(avg, 0.99, axis=0), 1e-9)
         self.fit_scores_ = self._combine(err)
         return self
 
-    def _held_out(self, Z):
+    def _held_out(self, Z, E):
         """Each sensor's prediction on blocks of time its models were not fitted on."""
         pred = np.zeros_like(Z)
         for test in blocked_folds(len(Z), self.k):
             train = np.setdiff1d(np.arange(len(Z)), test)
             for j, (others, _, _) in self.models_.items():
-                m1, m2 = self._fit_pair(Z[train][:, others], Z[train, j])
-                pred[test, j] = self._predict(m1, m2, Z[test][:, others])
+                A = np.hstack([Z[:, others], E])
+                m1, m2 = self._fit_pair(A[train], Z[train, j])
+                pred[test, j] = self._predict(m1, m2, A[test])
         return pred
 
     def _combine(self, err):
@@ -332,10 +339,11 @@ class LinkResidual(Detector):
         return np.maximum(now, avg).max(1)
 
     def errors(self, X):
+        X, E = self._separate(X)
         Z = self._z(X)
         err = np.zeros_like(Z)
         for j, (others, m1, m2) in self.models_.items():
-            err[:, j] = Z[:, j] - self._predict(m1, m2, Z[:, others])
+            err[:, j] = Z[:, j] - self._predict(m1, m2, np.hstack([Z[:, others], E]))
         return err
 
     def score(self, X):
@@ -365,6 +373,31 @@ class CurvedLinkResidual(LinkResidual):
         super().__init__(curved=True, window=window, k=k, seed=seed)
 
 
+class StraightLinkStageTold(LinkResidual):
+    """Straight-link residual that is told which stage of a batch each reading belongs to.
+
+    The LAST column of X is not a sensor: it is the stage of each reading, as a whole number
+    (a recipe step, or a slice of the batch's progress). It is turned into one yes/no input per
+    stage and given to every sensor's straight-line model, so each sensor gets its own level in
+    each stage and the same slopes throughout. The stage itself is never predicted or scored.
+    A stage that was not in the fit data gets no level of its own.
+
+    Only for data that has a stage column, so it is not in run.METHODS (see batch.py).
+    """
+    name = "Straight-link residual, stage told"
+
+    def __init__(self, window: int = 5, k: int = 5):
+        super().__init__(curved=False, window=window, k=k)
+        self.name = type(self).name
+
+    def fit(self, X):
+        self.stages_ = np.unique(X[:, -1])
+        return super().fit(X)
+
+    def _separate(self, X):
+        return X[:, :-1], (X[:, -1][:, None] == self.stages_[None, :]).astype(float)
+
+
 REGISTRY = {
     "rolling_z": RollingZ,
     "ewma": EWMA,
@@ -374,6 +407,7 @@ REGISTRY = {
     "matrix_profile": MatrixProfileAB,
     "link_straight": StraightLinkResidual,
     "link_curved": CurvedLinkResidual,
+    "link_straight_told": StraightLinkStageTold,
 }
 
 

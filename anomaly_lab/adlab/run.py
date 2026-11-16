@@ -35,6 +35,11 @@ METHODS = {
     "link_straight": {"window": 5},
     "link_curved": {"window": 5},
 }
+# Detectors that only make sense for some data, so they are scored only when asked for by name
+# and never by default: the stage-told straight-link residual needs a stage column (batch.py).
+EXTRA_METHODS = {
+    "link_straight_told": {"window": 5},
+}
 FAR = 0.01
 # A gap between two methods smaller than this is not called a win. It is a fixed number, so it
 # does not move when detectors are added. It was chosen from the first pilot with six detectors,
@@ -43,10 +48,15 @@ FAR = 0.01
 MARGIN = 0.12
 
 
+def settings(method: str) -> dict:
+    """A detector's settings: from METHODS, or from EXTRA_METHODS for the ones scored only on request."""
+    return METHODS[method] if method in METHODS else EXTRA_METHODS[method]
+
+
 def _cache_path(ds: str, method: str, seed: int) -> Path:
     """Cache file per dataset, method, settings and seed: changing a setting gives a new file."""
     import hashlib
-    tag = hashlib.md5(json.dumps(METHODS[method], sort_keys=True).encode()).hexdigest()[:6]
+    tag = hashlib.md5(json.dumps(settings(method), sort_keys=True).encode()).hexdigest()[:6]
     return CACHE / f"{ds}__{method}__{tag}__s{seed}.npz"
 
 
@@ -55,7 +65,7 @@ def score_dataset(ds: D.Dataset, method: str, seed: int, verbose: bool = True) -
     path = _cache_path(ds.name, method, seed)
     if path.exists():
         return path
-    params = dict(METHODS[method])
+    params = dict(settings(method))
     if det.REGISTRY[method].stochastic:
         params["seed"] = seed
     t0 = time.time()

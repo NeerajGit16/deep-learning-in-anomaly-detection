@@ -466,3 +466,86 @@ def scatter_panels(panels: list, across: int = 3):
         ax.tick_params(labelsize=7)
     fig.tight_layout()
     return fig
+
+
+# ---------------------------------------------------------------- batch processes
+
+def _wrap(text: str, width: int = 58) -> str:
+    """Long panel titles on two lines, so neighbouring panels' titles do not run into each other."""
+    import textwrap
+    return textwrap.fill(text, width)
+
+
+def stage_colours(n: int) -> list:
+    """Colours for n stages of a batch: three fixed hues for up to three stages; for more, one
+    blue from light (early) to dark (late), because the stages are in order."""
+    if n <= 3:
+        return [BLUE, ORANGE, AQUA][:n]
+    return [SEQ(v) for v in np.linspace(0.3, 1.0, n)]
+
+
+def _spread(x: np.ndarray, rng, few: int = 20) -> np.ndarray:
+    """A reading with few distinct values (whole numbers, a valve with 4 positions) spread a little
+    sideways, by up to a third of the gap between its values, so dots on the same value can be seen."""
+    values = np.unique(x)
+    if len(values) > few or len(values) < 2:
+        return x
+    return x + rng.uniform(-1, 1, len(x)) * np.diff(values).min() / 3
+
+
+def scatter_by_stage(X: np.ndarray, stage: np.ndarray, pairs: list, names: list, describe: dict | None = None,
+                     stage_names: dict | None = None, every: int = 1, across: int = 2):
+    """One panel per (sensor, its best single predictor), each reading coloured by the stage of the batch.
+
+    If the points of every stage fall along one bent line, the link is a real curve. If each stage is
+    its own patch, off any shared line, the "curve" is the stages sitting in different places.
+    Readings that take 20 or fewer distinct values are spread a little sideways (_spread).
+    """
+    describe, stage_names = describe or {}, stage_names or {}
+    rng = np.random.default_rng(0)
+    keep = np.arange(0, len(X), every)
+    st = np.asarray(stage)[keep]
+    levels = sorted(np.unique(st))
+    colours = stage_colours(len(levels))
+    rows = -(-len(pairs) // across)
+    fig, axes = plt.subplots(rows, across, figsize=(5.0 * across, 3.9 * rows + 0.3), squeeze=False)
+    for ax in axes.ravel()[len(pairs):]:
+        ax.set_visible(False)
+    for ax, (target, partner) in zip(axes.ravel(), pairs):
+        x, y = _spread(X[keep, names.index(partner)], rng), _spread(X[keep, names.index(target)], rng)
+        for level, colour in zip(levels, colours):
+            pick = st == level
+            ax.scatter(x[pick], y[pick], s=4, color=colour, lw=0, alpha=0.6, rasterized=True,
+                       label=stage_names.get(level, str(level)))
+        ax.set_title(_wrap(describe.get(target, target)), fontsize=9)
+        ax.set_xlabel(_wrap(describe.get(partner, partner)), fontsize=8)
+        ax.set_ylabel(target, fontsize=8)
+        ax.grid(color=GRID, lw=0.6)
+        ax.tick_params(labelsize=7)
+        ax.legend(fontsize=7, markerscale=3, frameon=False, loc="best")
+    fig.tight_layout()
+    return fig
+
+
+def over_a_batch(runs: list, stages: list, channels: list, sensors: list, describe: dict | None = None,
+                 what: str = "", across: int = 2):
+    """One panel per sensor: each batch as a thin line over time, with the stage changes marked."""
+    describe = describe or {}
+    rows = -(-len(sensors) // across)
+    fig, axes = plt.subplots(rows, across, figsize=(5.4 * across, 2.6 * rows + 0.3), squeeze=False)
+    for ax in axes.ravel()[len(sensors):]:
+        ax.set_visible(False)
+    for ax, name in zip(axes.ravel(), sensors):
+        j = channels.index(name)
+        for X, st in zip(runs, stages):
+            ax.plot(np.arange(len(X)), X[:, j], color=BLUE, lw=0.9, alpha=0.6)
+            for k in np.flatnonzero(np.diff(np.asarray(st))) + 1:
+                ax.axvline(k, color=INK2, lw=0.6, ls=(0, (2, 3)), alpha=0.5)
+        ax.set_title(_wrap(describe.get(name, name)), fontsize=9)
+        ax.set_xlabel("seconds into the batch (dotted: stage changes)", fontsize=8)
+        ax.grid(color=GRID, lw=0.6)
+        ax.tick_params(labelsize=7)
+    if what:
+        fig.suptitle(what, x=0.01, ha="left", fontsize=10)
+    fig.tight_layout()
+    return fig

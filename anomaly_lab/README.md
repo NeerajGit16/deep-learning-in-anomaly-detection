@@ -38,13 +38,16 @@ uv run pytest                            # checks everything works
 | `04_delayed_links.ipynb` | Whether links that arrive late (one sensor following another after a delay) change the picture |
 | `05_cranfield.ipynb` | A real flow rig run at 20 flow settings (Cranfield): how curved its links are, and the detectors on its 16 faulty runs |
 | `06_multimode_tep.ipynb` | The chemical plant run in six operating modes (Reinartz files): how curved its links are when the modes are pooled |
+| `07_metal_etch.ipynb` | A plasma etcher, wafer by wafer (a batch process): how curved its links are, and the detectors on its 21 faulty wafers |
 | `adlab/data.py` | Loads SKAB, Tennessee Eastman (Braatz and Rieth files) and the Cranfield flow rig; plain-English sensor tables (`SKAB_INFO`, `TEP_INFO`, `CRANFIELD_INFO`) |
 | `adlab/explore.py` | Summary tables: faults per kind, how far each sensor moves, which sensors move together |
 | `adlab/plots.py` | All the figures |
-| `adlab/detectors.py` | The six simple detectors, plus the straight-link and curved-link residual detectors |
+| `adlab/detectors.py` | The six simple detectors, plus the straight-link and curved-link residual detectors (and, for batch data, a straight-link one told the stage) |
 | `adlab/structure.py` | Curvature measure and fault labelling |
 | `adlab/cranfield.py` | The curvature measures for the Cranfield rig, whose runs each pass through many flow settings |
 | `adlab/multimode.py` | Fetches and loads the six-mode Tennessee Eastman runs, and puts its curvature measures together |
+| `adlab/batch.py` | Batch processes: whole batches held out, the stage of a batch in place of the mode, and alarm lines set per group of batches |
+| `adlab/etch.py` | Loads the metal etch wafers and puts their curvature measures and detectors together |
 | `adlab/remote.py` | Reads parts of a very large remote file without downloading all of it |
 | `adlab/cva.py` | The Cranfield authors' own monitoring method, ported from their example; used only to check we read their data as they do |
 | `adlab/simulate.py` | A first small simulator with a curvature dial |
@@ -59,6 +62,8 @@ uv run pytest                            # checks everything works
 ## Slow steps
 
 Anything slow (scoring runs, the curvature measure, resampling, downloads) shows a progress bar with the time remaining. Pass `verbose=False` to switch a bar off.
+
+While a slow step runs on Windows, the computer is asked not to go to sleep by itself (closing the lid still sends it to sleep).
 
 To follow a job running in the background, set `ADLAB_PROGRESS_LOG=1` before starting it. It then writes one line per step to `results/progress.log`: the time, what finished, how many are done out of how many, and the estimated time left.
 
@@ -76,6 +81,7 @@ uv run python -m adlab.run report    # writes results/pilot_report.md and figure
 
 - **SKAB:** Katser and Kozitsin, Skoltech, 2020. https://github.com/waico/SKAB (GPL-3.0).
 - **Cranfield multiphase flow rig:** Ruiz-Carcel, Cao, Mba, Lao and Samuel, 2015, *Statistical process monitoring of a multiphase flow facility*, Control Engineering Practice 42, 74-88. Data: the `cvatutor` package, version 1.1.0 (MATLAB File Exchange 50938). It is not downloaded automatically: unpack it by hand so that the `.mat` files sit in `data/raw/cranfield/cvatutor-1.1.0/CVACaseStudy/`.
+- **Metal etch:** Wise, Gallagher, Butler, White and Barna, 1999, *A comparison of principal component analysis, multiway principal component analysis, trilinear decomposition and parallel factor analysis for fault detection in a semiconductor etch process*, Journal of Chemometrics 13, 379-396. Data: Eigenvector Research, `MACHINE_Data.mat` from https://eigenvector.com/resources/data-sets/metal-etch-data-for-fault-detection-evaluation/ (about 2 MB, downloaded by `etch.download()`). How the faults were made: http://www.eigenvector.com/Docs/Sensitivity.pdf.
 - **Tennessee Eastman:**
   - Six operating modes: Reinartz, Kulahci and Ravn, 2021, *An extended Tennessee Eastman simulation dataset for fault-detection and decision support systems*, Computers and Chemical Engineering 149, 107281. Data: data.dtu.dk, [doi:10.11583/DTU.13385936](https://doi.org/10.11583/DTU.13385936) (public domain). The full set is 143 GB; `06_multimode_tep.ipynb` fetches only the fault-free and mode-transition runs (about 0.5 GB, about 17 minutes) by reading them out of the remote files.
   - Plant model: Downs and Vogel, 1993.
