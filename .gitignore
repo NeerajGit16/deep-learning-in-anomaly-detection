@@ -12,9 +12,5 @@ __pycache__/
 .ipynb_checkpoints/
 *.egg-info/
 
-# 2022 summer project: kept on disk, out of the repo
-2022 YRF Work/
-2022 YRF Literature/
-
 # Progress of background jobs (see adlab/progress.py)
 anomaly_lab/results/progress.log
