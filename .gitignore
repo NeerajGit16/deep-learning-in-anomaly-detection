@@ -14,3 +14,6 @@ __pycache__/
 
 # Progress of background jobs (see adlab/progress.py)
 anomaly_lab/results/progress.log
+
+# PenSimPy's own environment (see anomaly_lab/results/indpensim_generation_feasibility.md)
+pensim-env/
