@@ -60,3 +60,17 @@ def test_holding_the_feed_moves_the_measurements_and_holding_the_oil_does_not():
         if len(seen) == 2:
             break
     assert seen["feed"] > 1e-3 and seen["oil"] < 1e-12
+
+
+def test_fault_size_moves_the_held_value_part_of_the_way_and_keeps_the_same_faults():
+    full = S.recipe_batches(6, dial=1.0, seed=1, faulty=True, noise=0.0)
+    half = S.recipe_batches(6, dial=1.0, seed=1, faulty=True, noise=0.0, fault_size=0.5)
+    clean = S.recipe_batches(6, dial=1.0, seed=1, noise=0.0)
+    for f, h, c in zip(full, half, clean):
+        assert f["output held"] == h["output held"] and np.array_equal(f["fault"], h["fault"])
+        if len(c["X"]) != len(f["X"]):
+            continue
+        k = S.REC_OUTPUTS.index(f["output held"])
+        on = np.flatnonzero(f["fault"])
+        start = c["X"][on[0], k]
+        assert np.allclose(h["X"][on, k], start + 0.5 * (f["X"][on, k] - start))

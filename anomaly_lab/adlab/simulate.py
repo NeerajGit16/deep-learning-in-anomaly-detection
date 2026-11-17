@@ -125,12 +125,14 @@ def _lag(x, tau):
 
 
 def recipe_batches(n_batches: int, dial: float = 1.0, seed: int = 0, readings: int = 250, faulty: bool = False,
-                   noise: float = 0.02, recipe_seed: int = 7) -> list[dict]:
+                   noise: float = 0.02, recipe_seed: int = 7, fault_size: float = 1.0) -> list[dict]:
     """Batches of the recipe generator: [{"batch", "X" (readings x 12: outputs then measurements), "fault"
     (0/1 per reading), "stage" (tenth of the batch), "faulty", "fault kind", "output held"}].
 
     Every batch follows the recipe fixed by recipe_seed; seed draws everything else. faulty=True gives every
-    batch one fault (fixed design above)."""
+    batch one fault (fixed design above). fault_size (round 3) moves the held value only that share of the way
+    from the output's value at the start of the stretch towards the value chosen above (1 = as designed); the same
+    faults are drawn whatever the size."""
     rec_rng = np.random.default_rng(recipe_seed)
     sched = _recipe(rec_rng)
     mix = rec_rng.uniform(0.3, 1.0, (len(REC_MEASURES), 3))     # each measurement's mix of progress, feed and air
@@ -161,7 +163,7 @@ def recipe_batches(n_batches: int, dial: float = 1.0, seed: int = 0, readings: i
                 candidates = values
             candidates = candidates[np.abs(candidates - now) >= 0.25 * (hi - lo)]
             value = float(rng.choice(candidates)) if len(candidates) else (lo if now - lo > hi - now else hi)
-            U[stretch, held] = value
+            U[stretch, held] = now + fault_size * (value - now)
             fault[stretch] = 1
         feed, air = _lag(U[:, 0], 6.0), _lag(U[:, 1], 4.0)
         M = np.column_stack([a * p + c * feed / 5.5 + f * air / 5.5 for a, c, f in mix])
