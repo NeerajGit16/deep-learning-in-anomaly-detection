@@ -39,6 +39,7 @@ ASIDE = "held-aside part (deep models, straight forecaster, PCA scored alike)"
 # Registry keys whose error scale is set on held-out blocks of time, or on a held-aside part.
 BLOCK_METHODS = {"link_straight", "link_curved", "link_kinked", "link_straight_told"}
 ASIDE_METHODS = {"deep_ae", "deep_lstm", "deep_gdn", "deep_gdn_paper", "deep_usad", "straight_forecaster", "pca_twin"}
+ASIDE_METHODS |= {"deep_ae_outputs_v2", "deep_ae_v2", "deep_lstm_v2", "deep_pcac_v2", "deep_gdn_v2", "deep_gdn_paper_v2", "deep_usad_v2"}  # round 5
 # A dataset copy with balanced folds is named with one of these endings; the detectors that do not use
 # the balanced folds read and write the original dataset's scores.
 SUFFIXES = {"_balanced_blocks": BLOCK_METHODS, "_balanced_aside": ASIDE_METHODS,

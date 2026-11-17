@@ -44,6 +44,11 @@ DEFAULT_WINDOWS = (10, 20)
 SMOOTH = 5                       # the straight-link detector's averaging window
 GDN_SMOOTH = 3
 MAX_EPOCHS, PATIENCE, BATCH, LR = 100, 10, 256, 1e-3
+# Round 5, part 2 (fixed before computing): a longer training budget. "v1" is notebook 09's; "v2" allows up to 1,000
+# passes, stops when the held-aside error has not improved for 30 passes, and halves the learning rate when it has
+# not improved for 10. Everything else is unchanged.
+BUDGETS = {"v1": {"max": MAX_EPOCHS, "patience": PATIENCE, "lr_patience": None},
+           "v2": {"max": 1000, "patience": 30, "lr_patience": 10}}
 ROOT = Path(__file__).resolve().parents[1]
 STORE = ROOT / "results" / "cache" / "deep"
 LOG = STORE / "training_log.jsonl"
@@ -181,6 +186,24 @@ def _nets():
             z = self.norm(z.reshape(b * d, dim)).reshape(b, d, dim)
             return self.out(torch.relu(z) * self.emb).squeeze(-1)        # (batch, d)
 
+    class PCAC(nn.Module):
+        """PCA's reconstruction plus a learned correction from the PCA scores (64-32-64), the correction starting at
+        zero: the model starts as PCA and can only add bends."""
+
+        def __init__(self, centre, P):
+            super().__init__()
+            self.register_buffer("c", torch.as_tensor(centre, dtype=torch.float32))
+            self.register_buffer("P", torch.as_tensor(P, dtype=torch.float32))
+            d, k = P.shape
+            self.g = nn.Sequential(nn.Linear(k, 64), nn.ELU(), nn.Linear(64, 32), nn.ELU(), nn.Linear(32, 64), nn.ELU(),
+                                   nn.Linear(64, d))
+            nn.init.zeros_(self.g[-1].weight)
+            nn.init.zeros_(self.g[-1].bias)
+
+        def forward(self, x):
+            t = (x - self.c) @ self.P
+            return self.c + t @ self.P.T + self.g(t)
+
     class USAD(nn.Module):
         def __init__(self, n_in, latent):
             super().__init__()
@@ -199,7 +222,7 @@ def _nets():
             w1 = self.dec1(z)
             return w1, self.dec2(z), self.dec2(self.enc(w1))
 
-    return {"AE": AE, "LSTM": LSTM, "GDN": GDN, "USAD": USAD}
+    return {"AE": AE, "LSTM": LSTM, "GDN": GDN, "USAD": USAD, "PCAC": PCAC}
 
 
 def weights(net) -> int:
@@ -208,11 +231,21 @@ def weights(net) -> int:
 
 # ---------------------------------------------------------------- the detectors
 
+def _scheduler(optim, cfg):
+    """Halve the learning rate when the held-aside error has not improved for cfg["lr_patience"] passes (v2 only)."""
+    if not cfg.get("lr_patience"):
+        return None
+    torch = _torch()
+    return torch.optim.lr_scheduler.ReduceLROnPlateau(optim, mode="min", factor=0.5, patience=cfg["lr_patience"],
+                                                      threshold=1e-7, threshold_mode="abs")
+
+
 class DeepDetector(Detector):
     """Shared training, settings choice, caching and scoring. Subclasses define the network."""
     stochastic = True
     kind = "base"                    # "snapshot", "forecast" or "window"
     link_score = True                # combine per-sensor errors like the straight-link detector
+    budget = "v1"                    # training budget (BUDGETS); round 5's long-training models use "v2"
 
     def __init__(self, seed: int = 0):
         self.seed = seed
@@ -264,26 +297,30 @@ class DeepDetector(Detector):
         gen, dev, Zt, tr, ho = self._setup(Z, train_segs, aside_segs, w, self.kind == "forecast")
         net = self.build(Z.shape[1], opt).to(dev)
         optim = torch.optim.Adam(net.parameters(), lr=LR)
+        cfg = BUDGETS[self.budget]
+        sched = _scheduler(optim, cfg)
         best, best_state, wait, passes = np.inf, None, 0, 0
         t0 = time.time()
-        for epoch in range(1, MAX_EPOCHS + 1):
+        for epoch in range(1, cfg["max"] + 1):
             net.train()
             for pt in self._batches(tr, gen):
                 self._step(net, optim, Zt, pt, w, epoch)
             hold = self._aside_error(net, Zt, ho, w)
             passes = epoch
+            if sched is not None:
+                sched.step(hold)
             if hold < best - 1e-7:
                 best, wait = hold, 0
                 best_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
             else:
                 wait += 1
-                if wait >= PATIENCE:
+                if wait >= cfg["patience"]:
                     break
         net.load_state_dict(best_state)
         net.eval()
         return net, float(best), passes, time.time() - t0
 
-    def _step(self, net, optim, Zt, pt, w, epoch):
+    def _step(self, net, optim, Zt, pt, w, epoch):  # noqa: D401
         optim.zero_grad()
         loss = self._loss(net, Zt, pt, w, epoch)
         loss.backward()
@@ -306,6 +343,8 @@ class DeepDetector(Detector):
 
     def _store(self, X, tag):
         STORE.mkdir(parents=True, exist_ok=True)
+        if self.budget != "v1":                       # round 5: long-training networks are stored apart
+            tag = f"{self.budget}__{tag}"
         balanced = "b" if ((self.context_ or {}).get("fold_groups") or {}).get("aside") is not None else ""  # round 4
         return STORE / f"{self.family}__{self._key(X)}{balanced}__{tag}"
 
@@ -376,7 +415,9 @@ class DeepDetector(Detector):
         torch.save({"state": net.state_dict(), "error": err, "passes": passes, "seconds": secs}, path)
         STORE.mkdir(parents=True, exist_ok=True)
         with open(LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"model": getattr(self, "log_name", self.family), "dataset": self.context_.get("dataset"),
+            f.write(json.dumps({"model": getattr(self, "log_name", self.family) + ("" if self.budget == "v1" else f" ({self.budget})"),
+                                "budget": self.budget, "max passes": BUDGETS[self.budget]["max"],
+                                "dataset": self.context_.get("dataset"),
                                 "run": self.context_.get("run"),
                                 "fit": self._key(X), "seed": self.seed, "setting": opt, "weights": weights(net),
                                 "held-aside error": err, "predict-the-average error": self.baseline_error_,
@@ -518,9 +559,11 @@ class USADDetector(DeepDetector):
         net = self.build(Z.shape[1], opt).to(dev)
         opt1 = torch.optim.Adam(list(net.enc.parameters()) + list(net.dec1.parameters()), lr=LR)
         opt2 = torch.optim.Adam(list(net.enc.parameters()) + list(net.dec2.parameters()), lr=LR)
+        cfg = BUDGETS[self.budget]
+        scheds = [x for x in (_scheduler(opt1, cfg), _scheduler(opt2, cfg)) if x is not None]
         best, best_state, wait, passes = np.inf, None, 0, 0
         t0 = time.time()
-        for n in range(1, MAX_EPOCHS + 1):
+        for n in range(1, cfg["max"] + 1):
             net.train()
             for p in self._batches(tr, gen):
                 x = self._inputs(Zt, p, w).reshape(len(p), -1)
@@ -537,12 +580,14 @@ class USADDetector(DeepDetector):
                 opt2.step()
             hold = self._aside_error(net, Zt, ho, w)
             passes = n
+            for sc in scheds:
+                sc.step(hold)
             if hold < best - 1e-7:
                 best, wait = hold, 0
                 best_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
             else:
                 wait += 1
-                if wait >= PATIENCE:
+                if wait >= cfg["patience"]:
                     break
         net.load_state_dict(best_state)
         net.eval()
@@ -672,8 +717,52 @@ class PCATwin(Detector):
         return self.aside_scores_
 
 
+class PCACorrection(DeepDetector):
+    """Round 5: the PCA-plus-correction autoencoder. The reading is first rebuilt by PCA, fitted on the training part
+    with notebook 09's component count (90% of the variance); a small network (64-32-64) then learns, from the PCA
+    scores, to correct what PCA leaves. Its last layer starts at zero, so the model starts as PCA exactly and can only
+    add bends. Trained with the long budget ("v2") and scored like the autoencoder."""
+    name = "PCA + correction autoencoder"
+    family = "pcac"
+    kind = "snapshot"
+    budget = "v2"
+
+    def options(self, d, dataset):
+        return [{"b": self.k_}]
+
+    def fit(self, X):
+        from .detectors import PCA
+        mu, sd = _standardiser(X)
+        Z = (X - mu) / sd
+        train_segs, _ = split_for(self.context_, len(Z))
+        train = np.concatenate([np.arange(a, b) for a, b in train_segs])
+        self.k_ = int(PCA(var=0.90).fit(X).k_)
+        centre = Z[train].mean(0)
+        _, _, vt = np.linalg.svd(Z[train] - centre, full_matrices=False)
+        self.pca_centre_, self.pca_P_ = centre, vt[: self.k_].T
+        return super().fit(X)
+
+    def build(self, d, opt):
+        return _nets()["PCAC"](self.pca_centre_, self.pca_P_)
+
+
+def _long(cls, label):
+    """The same model with round 5's long training budget, under its own name."""
+    return type(cls.__name__ + "Long", (cls,), {"budget": "v2", "name": f"{cls.name}, long training"})
+
+
+AutoencoderLong = _long(Autoencoder, "autoencoder")
+LSTMLong = _long(LSTMForecaster, "lstm")
+GDNLong = _long(GDNDetector, "gdn")
+GDNPaperLong = _long(GDNPaperScore, "gdn paper")
+USADLong = _long(USADDetector, "usad")
+
 MODELS = {"deep_ae": Autoencoder, "deep_lstm": LSTMForecaster, "deep_gdn": GDNDetector,
           "deep_gdn_paper": GDNPaperScore, "deep_usad": USADDetector}
+# Round 5, part 2: every deep model again with the long budget, and the PCA-plus-correction autoencoder.
+MODELS_V2 = {"deep_ae_v2": AutoencoderLong, "deep_lstm_v2": LSTMLong, "deep_pcac_v2": PCACorrection,
+             "deep_gdn_v2": GDNLong, "deep_gdn_paper_v2": GDNPaperLong, "deep_usad_v2": USADLong}
+DEEP_V2 = list(MODELS_V2)
 TWINS = {"deep_ae": "pca", "deep_lstm": "straight_forecaster", "deep_gdn": "link_straight",
          "deep_gdn_paper": "link_straight", "deep_usad": "deep_ae"}
 
@@ -980,6 +1069,7 @@ def self_checks() -> dict:
 def _register():
     from . import detectors
     detectors.REGISTRY.update(MODELS)
+    detectors.REGISTRY.update(MODELS_V2)
     detectors.REGISTRY["straight_forecaster"] = StraightForecaster
     detectors.REGISTRY["pca_twin"] = PCATwin
 

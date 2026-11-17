@@ -392,14 +392,17 @@ def role_table(raw: Path = RAW) -> pd.DataFrame:
     return out
 
 
-def dataset(told: bool = False, raw: Path = RAW) -> Dataset:
+def dataset(told: bool = False, raw: Path = RAW, drop: tuple = (), tag: str = "") -> Dataset:
     """Faulty wafers as runs (every reading labelled faulty), the line and check wafers as
     val_normal, and the fit wafers of all three experiments joined as the fit data.
 
     told=True appends the recipe step as a last column, for the stage-told straight-link detector.
+    drop leaves those columns out (round 5); the dataset is then named with "_without_<tag>".
     """
+    keep = [i for i, c in enumerate(CHANNELS) if c not in drop]
+
     def x(w):
-        return np.column_stack([w["X"], w["step"]]) if told else w["X"]
+        return np.column_stack([w["X"][:, keep], w["step"]]) if told else w["X"][:, keep]
 
     ws, r = normal_wafers(raw), roles(raw)
     fit = np.vstack([x(w) for w, role in zip(ws, r) if role == "fit"])
@@ -407,7 +410,8 @@ def dataset(told: bool = False, raw: Path = RAW) -> Dataset:
                 meta={"experiment": w["experiment"], "fault": w["fault"]}) for w in faulty_wafers(raw)]
     val = [Run(w["wafer"], x(w), np.zeros(w["readings"], int), fit, group="normal",
                meta={"experiment": w["experiment"], "role": role}) for w, role in zip(ws, r) if role != "fit"]
-    return Dataset(TOLD_NAME if told else CACHE, runs, CHANNELS + (["Step Number"] if told else []), 1.0, val,
+    name = (TOLD_NAME if told else CACHE) + (f"_without_{tag}" if drop else "")
+    return Dataset(name, runs, [CHANNELS[i] for i in keep] + (["Step Number"] if told else []), 1.0, val,
                    fit_lengths=[w["readings"] for w, role in zip(ws, r) if role == "fit"])
 
 

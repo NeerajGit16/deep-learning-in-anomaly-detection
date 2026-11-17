@@ -445,11 +445,11 @@ def _columns(kind: str) -> list[int]:
     return [i for i, c in enumerate(indpensim.CHANNELS) if roles[c] == role]
 
 
-def _autoencoder_on(kind: str):
-    from .deep import Autoencoder
+def _autoencoder_on(kind: str, long: bool = False):
+    from .deep import Autoencoder, AutoencoderLong
 
-    class AutoencoderOn(Autoencoder):
-        name = f"Autoencoder, {kind} only"
+    class AutoencoderOn(AutoencoderLong if long else Autoencoder):
+        name = f"Autoencoder, {kind} only" + (", long training" if long else "")
         log_name = f"autoencoder, {kind} only (notebook 11)"   # kept apart from the headline autoencoder in the log
         cols = _columns(kind)
 
@@ -459,13 +459,14 @@ def _autoencoder_on(kind: str):
         def score(self, X):
             return super().score(X[:, self.cols])
 
-    AutoencoderOn.__name__ = f"Autoencoder_{kind}"
+    AutoencoderOn.__name__ = f"Autoencoder_{kind}" + ("_long" if long else "")
     return AutoencoderOn
 
 
 INGREDIENTS = {"pca_hinges": PCAHinges, "pca_switches": PCASwitches, "pca_by_stage": PCAByStage,
                "pca_by_strategy": PCAByStrategy, "deep_ae_measurements": _autoencoder_on("measurements"),
                "deep_ae_outputs": _autoencoder_on("outputs"),
+               "deep_ae_outputs_v2": _autoencoder_on("outputs", long=True),      # round 5: the long training budget
                "link_straight_alike": StraightLinkAlike, "link_curved_alike": CurvedLinkAlike}
 ADDED = ["link_straight_alike", "link_curved_alike"]          # added after B1's first results
 SOURCES = {"pca_by_stage": "stage", "pca_by_strategy": "strategy"}

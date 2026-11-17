@@ -54,6 +54,9 @@ EXTRA_METHODS = {
     "nearest_all_1": {"k": 1, "max_fit": 50000}, "nearest_all_5": {"max_fit": 50000}, "unseen_all": {},
     "dpca": {"lags": 2, "var": 0.90}, "cva": {"p": 5, "f": 5, "n": 25}, "kpca": {"sample": 3000, "var": 0.90},
     "recipe_hour_stepped": {},
+    # round 5, part 2: every deep model with the long training budget, and the PCA-plus-correction autoencoder
+    "deep_ae_v2": {}, "deep_lstm_v2": {}, "deep_pcac_v2": {}, "deep_gdn_v2": {}, "deep_gdn_paper_v2": {},
+    "deep_usad_v2": {},
 }
 FAR = 0.01
 # A gap between two methods smaller than this is not called a win. It is a fixed number, so it
