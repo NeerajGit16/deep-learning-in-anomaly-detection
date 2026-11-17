@@ -49,6 +49,11 @@ EXTRA_METHODS = {
     "unseen_value": {}, "nearest_1": {}, "nearest_5": {}, "recipe_hour": {},
     # round 3, part 4: the straight-link detector (and told the mode) with its error scale on balanced folds
     "link_straight_balanced": {"window": 5}, "link_straight_told_balanced": {"window": 5},
+    # round 4, part 2: classic simple detectors on every dataset (detectors.py); recipe_hour_stepped is the fix of
+    # recipe_hour made after seeing results
+    "nearest_all_1": {"k": 1, "max_fit": 50000}, "nearest_all_5": {"max_fit": 50000}, "unseen_all": {},
+    "dpca": {"lags": 2, "var": 0.90}, "cva": {"p": 5, "f": 5, "n": 25}, "kpca": {"sample": 3000, "var": 0.90},
+    "recipe_hour_stepped": {},
 }
 FAR = 0.01
 # A gap between two methods smaller than this is not called a win. It is a fixed number, so it
@@ -66,6 +71,8 @@ def settings(method: str) -> dict:
 def _cache_path(ds: str, method: str, seed: int) -> Path:
     """Cache file per dataset, method, settings and seed: changing a setting gives a new file."""
     import hashlib
+    from .folds import shared_name
+    ds = shared_name(ds, method)          # round 4: a balanced-folds copy shares the scores that do not use folds
     tag = hashlib.md5(json.dumps(settings(method), sort_keys=True).encode()).hexdigest()[:6]
     return CACHE / f"{ds}__{method}__{tag}__s{seed}.npz"
 
@@ -88,7 +95,7 @@ def score_dataset(ds: D.Dataset, method: str, seed: int, verbose: bool = True) -
             if hasattr(model, "context_"):        # models that hold data aside whole runs at a time, and log
                 model.context_ = {"dataset": ds.name, "run": run.name, "lengths": ds.fit_lengths,
                                   "outputs": ds.output_columns, "fit_groups": ds.fit_groups,
-                                  "settings": ds.deep_settings}
+                                  "settings": ds.deep_settings, "fold_groups": ds.fold_groups}
             model.fit(run.fit)
             fitted[key] = (model, model.score_fit(run.fit))
         model, fit_scores = fitted[key]

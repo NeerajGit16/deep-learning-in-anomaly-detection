@@ -32,7 +32,7 @@ SHORT = {"pump": "Pump", "plant": "Plant, one setting", "rig": "Flow rig", "tep6
          "etch": "Etcher", "indpensim": "Penicillin"}
 
 
-def straight_side() -> list[str]:
+def straight_side(flexible: list | None = None) -> list[str]:
     """The "best straight-line" set: every detector that is not deep, except the curved-link residual (the
     flexible model the third gap is about). Follow-up round: this now includes the straight forecaster and
     the PCA scored like the autoencoder (added after seeing results), and the per-sensor checks, PCA,
@@ -40,7 +40,8 @@ def straight_side() -> list[str]:
     stage- or mode-told straight-link detectors."""
     from . import deep
     from . import detectors as det
-    return [det.REGISTRY[k].name for k in deep.SIMPLE_ALL if det.REGISTRY[k].name not in FLEXIBLE]
+    flexible = FLEXIBLE if flexible is None else flexible
+    return [det.REGISTRY[k].name for k in deep.SIMPLE_ALL if det.REGISTRY[k].name not in flexible]
 
 
 def design(name: str) -> dict:
@@ -91,15 +92,20 @@ def _gap(res: dict, a: str, b: str) -> dict:
     return gap(res, a, b)
 
 
-def gaps(name: str) -> dict:
-    """The three detection gaps on one dataset, from its report with every detector (deep.report)."""
+def gaps(name: str, round4: bool = False) -> dict:
+    """The three detection gaps on one dataset, from its report with every detector (deep.report; round4=True:
+    round 4's report, with kernel PCA on the flexible side)."""
     from . import deep
     from . import detectors as det
-    res = deep.report(REPORT[name])
+    if round4:
+        from . import round4 as r4
+        res, flex = r4.report(REPORT[name]), FLEXIBLE_R4
+    else:
+        res, flex = deep.report(REPORT[name]), FLEXIBLE
     s = pd.DataFrame(res["summary"]).set_index("method")["dr_at_1pct"]
     deep_names = [det.REGISTRY[k].name for k in deep.DEEP if det.REGISTRY[k].name in s.index]
-    straight = [m for m in straight_side() if m in s.index]
-    flexible = [m for m in FLEXIBLE + deep_names if m in s.index]
+    straight = [m for m in straight_side(flex) if m in s.index]
+    flexible = [m for m in flex + deep_names if m in s.index]
     best_deep = s[deep_names].idxmax() if deep_names else None
     best_straight, best_flexible = s[straight].idxmax(), s[flexible].idxmax()
     out = {"curved-link minus straight-link": _gap(res, "Curved-link residual", "Straight-link residual")}
@@ -109,11 +115,12 @@ def gaps(name: str) -> dict:
     return out
 
 
-def table() -> pd.DataFrame:
-    """One row per dataset: the curved share (points, with range), the kinked gain and share, and the three gaps."""
+def table(round4: bool = False) -> pd.DataFrame:
+    """One row per dataset: the curved share (points, with range), the kinked gain and share, and the three gaps
+    (round4=True: on round 4's reports)."""
     rows = {}
     for name in DATASETS:
-        c, k, g = curved(name), kinked(name), gaps(name)
+        c, k, g = curved(name), kinked(name), gaps(name, round4)
         row = {"curved share": 100 * c["curved"], "curved low": 100 * c["curved_low"], "curved high": 100 * c["curved_high"],
                "kinked gain": 100 * k["curved"], "kinked low": 100 * k["curved_low"], "kinked high": 100 * k["curved_high"],
                "kinked share of the curve": k["curved"] / c["curved"] if c["curved"] > 0.002 else np.nan}
@@ -156,7 +163,7 @@ def same_order(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def chart(frame: pd.DataFrame):
+def chart(frame: pd.DataFrame, title: str | None = None):
     """The curved share against each gap, one panel per gap, every dataset a point with its ranges."""
     import matplotlib.pyplot as plt
     from . import plots
@@ -183,12 +190,109 @@ def chart(frame: pd.DataFrame):
         ax.set_title(g[0].upper() + g[1:], fontsize=10)
         ax.grid(color=plots.GRID, lw=0.6)
         plots.place_labels(ax, xs, ys, names)
+    if title:
+        fig.suptitle(title, x=0.01, ha="left")
     fig.tight_layout()
     return fig
 
 
-def save_chart(frame: pd.DataFrame, path: str = "results/across_datasets.png"):
+def save_chart(frame: pd.DataFrame, path: str = "results/across_datasets.png", title: str | None = None):
     """The chart as a picture for the README."""
-    fig = chart(frame)
+    fig = chart(frame, title)
     fig.savefig(path, dpi=110, bbox_inches="tight")
+    return fig
+
+
+# ---------------------------------------------------------------- round 4: memory checks and the repeat share
+
+# Round 4: kernel PCA can bend, so it joins the flexible side of the third gap (fixed before computing).
+FLEXIBLE_R4 = FLEXIBLE + ["Kernel PCA (RBF)"]
+# The memory checks: they compare a reading with stored normal readings or values.
+MEMORY = ["nearest_all_1", "nearest_all_5", "unseen_all", "nearest_1", "nearest_5", "unseen_value"]
+REPEAT_KEY = {"pump": "skab", "plant": "tep_rieth", "rig": "cranfield", "tep6": "tep6", "etch": "etch", "indpensim": "indpensim"}
+
+
+def memory_gap(name: str) -> dict:
+    """Best memory check minus the best straight-line detector that is not a memory check (round 4's report)."""
+    from . import deep
+    from . import detectors as det
+    from . import round4 as r4
+    res = r4.report(REPORT[name])
+    s = pd.DataFrame(res["summary"]).set_index("method")["dr_at_1pct"]
+    memory = [det.REGISTRY[k].name for k in MEMORY if det.REGISTRY[k].name in s.index]
+    straight = [m for m in straight_side(FLEXIBLE_R4) if m in s.index and m not in memory]
+    bm, bs = s[memory].idxmax(), s[straight].idxmax()
+    return deep.gap(res, bm, bs) | {"which": f"{bm} vs {bs}", "memory caught": s[bm], "straight caught": s[bs]}
+
+
+def repeat_frame() -> pd.DataFrame:
+    """Per real dataset: the repeat share and the curved share, each with its range, and the memory checks' gap."""
+    from . import folds
+    from . import round4 as r4
+    rt = r4.repeat_table()
+    rows = {}
+    for name in DATASETS:
+        rep_row = rt.loc[folds.TITLES[REPEAT_KEY[name]]]
+        c, g = curved(name), memory_gap(name)
+        rows[TITLES[name]] = {"repeat share": 100 * float(rep_row["repeat share"]), "repeat low": 100 * float(rep_row["low"]),
+                              "repeat high": 100 * float(rep_row["high"]),
+                              "curved share": 100 * c["curved"], "curved low": 100 * c["curved_low"], "curved high": 100 * c["curved_high"],
+                              "memory minus straight-line, points": 100 * g["gap"],
+                              "memory minus straight-line, range": f"{100 * g['low']:+.1f} to {100 * g['high']:+.1f}",
+                              "memory minus straight-line, verdict": g["verdict"],
+                              "memory minus straight-line, which": g["which"]}
+    out = pd.DataFrame(rows).T
+    out.index.name = "dataset"
+    return out
+
+
+def repeat_order(frame: pd.DataFrame) -> pd.DataFrame:
+    """Pairs of datasets in the same or opposite order on each measure and the memory checks' gap (as same_order)."""
+    rows = {}
+    y = frame["memory minus straight-line, points"].astype(float).to_numpy()
+    for measure in ("repeat share", "curved share"):
+        x = frame[measure].astype(float).to_numpy()
+        same = opposite = tied = 0
+        for i in range(len(x)):
+            for j in range(i + 1, len(x)):
+                if np.isnan(x[i] + x[j] + y[i] + y[j]) or x[i] == x[j] or y[i] == y[j]:
+                    tied += 1
+                elif (x[i] - x[j]) * (y[i] - y[j]) > 0:
+                    same += 1
+                else:
+                    opposite += 1
+        rows[measure] = {"pairs in the same order": same, "pairs in opposite orders": opposite,
+                         "pairs tied or missing": tied, "pairs": same + opposite + tied}
+    out = pd.DataFrame(rows).T
+    out.index.name = "measure against the memory checks' gap"
+    return out
+
+
+def repeat_chart(frame: pd.DataFrame):
+    """The memory checks' gap against the repeat share (left) and the curved share (right), with ranges."""
+    import matplotlib.pyplot as plt
+    from . import plots
+    short = {TITLES[k]: v for k, v in SHORT.items()}
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.8), sharey=True)
+    for ax, (measure, lo_c, hi_c, xlabel) in zip(axes, (
+            ("repeat share", "repeat low", "repeat high", "repeat share on normal data, % of readings"),
+            ("curved share", "curved low", "curved high", "curved share on normal data, points"))):
+        xs, ys, names = [], [], []
+        for name, r in frame.iterrows():
+            x, y = float(r[measure]), float(r["memory minus straight-line, points"])
+            lo, hi = (float(v) for v in r["memory minus straight-line, range"].split(" to "))
+            ax.hlines(y, float(r[lo_c]), float(r[hi_c]), color=plots.BLUE, lw=1.5)
+            ax.vlines(x, lo, hi, color=plots.BLUE, lw=1.5)
+            ax.plot(x, y, "o", color=plots.BLUE, ms=7, mec=plots.BG, mew=1.5, zorder=3)
+            xs.append(x), ys.append(y), names.append(short.get(name, name))
+        for v in (-12, 12):
+            ax.axhline(v, color=plots.ORANGE, lw=1, ls=(0, (3, 3)))
+        ax.axhline(0, color=plots.INK2, lw=0.8)
+        ax.set_xlabel(xlabel)
+        ax.grid(color=plots.GRID, lw=0.6)
+        plots.place_labels(ax, xs, ys, names)
+    axes[0].set_ylabel("best memory check minus best straight-line detector, points\n(dashed: the 12-point margin)")
+    axes[0].set_title("Against the repeat share", fontsize=10)
+    axes[1].set_title("Against the curved share", fontsize=10)
+    fig.tight_layout()
     return fig

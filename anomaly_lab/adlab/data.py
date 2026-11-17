@@ -72,6 +72,10 @@ class Dataset:
     output_columns: list | None = None
     fit_groups: list | None = None
     deep_settings: dict | None = None
+    # Round 4 (fold audit): {"blocks" and/or "aside": one group label per fitting reading (flow setting,
+    # operating mode, ...)}. Detectors that set an error scale on held-out blocks ("blocks") or a held-aside
+    # part ("aside") then use balanced folds by these groups (folds.py).
+    fold_groups: dict | None = None
 
     def calibration_runs(self) -> list[Run]:
         """The fault-free runs that set the alarm line under "matched" calibration."""

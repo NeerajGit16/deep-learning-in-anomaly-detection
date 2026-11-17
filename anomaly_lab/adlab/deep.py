@@ -98,6 +98,16 @@ def split_aside(segs: list, share: float = 0.2) -> tuple[list, list]:
     return train, aside
 
 
+def split_for(context: dict, n: int) -> tuple[list, list]:
+    """(training segments, held-aside segments): split_aside, or (round 4, on datasets the fold audit flags)
+    balanced by the dataset's groups (folds.balanced_aside)."""
+    groups = ((context or {}).get("fold_groups") or {}).get("aside")
+    if groups is not None and len(groups) == n:
+        from .folds import balanced_aside
+        return balanced_aside(groups, context.get("lengths"))
+    return split_aside(segments(n, (context or {}).get("lengths")))
+
+
 def ends(segs: list, w: int, ahead: bool) -> np.ndarray:
     """Positions p usable as targets: forecasting (ahead=True) needs readings p-w..p-1 inside the
     segment; a window ending at p (ahead=False) needs p-w+1..p."""
@@ -296,7 +306,8 @@ class DeepDetector(Detector):
 
     def _store(self, X, tag):
         STORE.mkdir(parents=True, exist_ok=True)
-        return STORE / f"{self.family}__{self._key(X)}__{tag}"
+        balanced = "b" if ((self.context_ or {}).get("fold_groups") or {}).get("aside") is not None else ""  # round 4
+        return STORE / f"{self.family}__{self._key(X)}{balanced}__{tag}"
 
     def fit(self, X):
         torch = _torch()
@@ -304,8 +315,7 @@ class DeepDetector(Detector):
         Z = self._space_fit(self._z(X))
         self.d_ = Z.shape[1]
         dataset = self.context_.get("dataset")
-        segs = segments(len(Z), self.context_.get("lengths"))
-        train_segs, aside_segs = split_aside(segs)
+        train_segs, aside_segs = split_for(self.context_, len(Z))
         aside = np.concatenate([np.arange(a, b) for a, b in aside_segs])
         train = np.concatenate([np.arange(a, b) for a, b in train_segs])
         # the error of simply predicting each sensor's average (from the training part), on held-aside data
@@ -584,7 +594,7 @@ class StraightForecaster(Detector):
         from sklearn.linear_model import RidgeCV
         super().fit(X)
         Z = self._z(X)
-        train_segs, aside_segs = split_aside(segments(len(Z), self.context_.get("lengths")))
+        train_segs, aside_segs = split_for(self.context_, len(Z))
         best = None
         options = windows_for(self.context_.get("dataset"))
         fixed = (self.context_.get("settings") or {}).get("straight_forecaster")
@@ -637,7 +647,7 @@ class PCATwin(Detector):
         from .detectors import PCA
         super().fit(X)
         Z = self._z(X)
-        train_segs, aside_segs = split_aside(segments(len(Z), self.context_.get("lengths")))
+        train_segs, aside_segs = split_for(self.context_, len(Z))
         train = np.concatenate([np.arange(a, b) for a, b in train_segs])
         self.b_ = int(PCA(var=0.90).fit(X).k_)                  # the autoencoder's bottleneck size
         _, _, vt = np.linalg.svd(Z[train] - Z[train].mean(0), full_matrices=False)
@@ -686,6 +696,8 @@ SCHEDULE = ["unseen_value", "nearest_1", "nearest_5", "recipe_hour"]
 # scale set on folds that keep every mode.
 BALANCED = {"tep6": ["link_straight_balanced", "link_straight_told_balanced"]}
 SIMPLE_ALL = SIMPLE + SCHEDULE + ["link_straight_balanced", "link_straight_told_balanced"]
+# Round 4, part 2: the classic simple detectors (detectors.CLASSIC) and the fixed recipe check count as simple too.
+SIMPLE_ALL = SIMPLE_ALL + ["nearest_all_1", "nearest_all_5", "unseen_all", "dpca", "cva", "kpca", "recipe_hour_stepped"]
 
 
 def _schedule(spec) -> list:
@@ -829,7 +841,8 @@ def training_table(dataset_name: str):
     if not LOG.exists():
         return pd.DataFrame()
     rows = [json.loads(line) for line in LOG.read_text(encoding="utf-8").splitlines() if line.strip()]
-    rows = [r for r in rows if (r.get("dataset") or "").startswith(dataset_name) and "notebook 11" not in r["model"]]
+    rows = [r for r in rows if (r.get("dataset") or "").startswith(dataset_name) and "notebook 11" not in r["model"]
+            and "_balanced" not in (r.get("dataset") or "")]          # round 4's balanced-fold refits are not listed here
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)

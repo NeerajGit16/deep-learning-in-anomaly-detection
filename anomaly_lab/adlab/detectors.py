@@ -40,6 +40,7 @@ def _windows(Z: np.ndarray, w: int) -> np.ndarray:
 class Detector:
     name = "base"
     stochastic = False
+    context_: dict = {}          # set by run.score_dataset (instance attribute); read-only here
 
     def fit(self, X: np.ndarray) -> "Detector":
         self.mu_, self.sd_ = _standardiser(X)
@@ -242,7 +243,21 @@ class MatrixProfileAB(Detector):
     def score(self, X):
         return self._profile(X, self_join=False)
 
+    SELF_JOIN_MAX = 20_000
+
     def score_fit(self, X):
+        # Round 4: with more than 20,000 fitting readings the self-join takes hours on one core, and it only sets one
+        # overall scale (every score, the scored runs' and the line runs' alike, is divided by the same number), so it
+        # changes no catch rate. Then the last 2,000 fitting readings are joined against the rest instead.
+        if len(X) > self.SELF_JOIN_MAX:
+            Z = self._z(X)
+            cut = len(Z) - 2000
+            out = np.zeros(2000)
+            for c in range(Z.shape[1]):
+                if np.ptp(Z[:, c]) > 0:
+                    d = nearest_window_distance(Z[cut:, c], Z[:cut, c], self.m)
+                    out = np.maximum(out, np.concatenate([np.full(self.m - 1, d[0]), d]) / np.sqrt(self.m))
+            return out
         # Joining the fit data with itself would match every window to itself (distance 0).
         return self._profile(X, self_join=True)
 
@@ -344,7 +359,12 @@ class LinkResidual(Detector):
         return self
 
     def _folds(self, n):
-        """The held-out folds that set each sensor's error scale: k blocks of time."""
+        """The held-out folds that set each sensor's error scale: k blocks of time, or (round 4, on datasets the
+        fold audit flags) balanced folds by the dataset's groups (folds.py)."""
+        groups = (self.context_.get("fold_groups") or {}).get("blocks")
+        if groups is not None and len(groups) == n:
+            from .folds import balanced_folds
+            return balanced_folds(groups, self.context_.get("lengths"), self.k)
         return blocked_folds(n, self.k)
 
     def _held_out(self, Z, E):
@@ -652,6 +672,269 @@ class StraightLinkStageToldBalanced(_BalancedFolds, StraightLinkStageTold):
         self.context_ = {}
 
 
+# ---------------------------------------------------------------- round 4, part 2: classic simple detectors
+#
+# Fixed before computing, scored and alarmed like the others. None of them sets an error scale on held-out
+# folds. Where a subsample is drawn it is drawn once, with seed 0, so they are not marked stochastic.
+
+def _gpu():
+    """PyTorch and its GPU when one is there (and not inside the tests); None otherwise. Only the nearest-neighbour
+    search uses it, to go faster: the distances are still recomputed in full precision on the CPU, so the numbers
+    are the same as on the CPU."""
+    from .progress import in_tests
+    if in_tests():
+        return None
+    try:
+        import torch
+    except ImportError:
+        return None
+    return (torch, torch.device("cuda")) if torch.cuda.is_available() else None
+
+
+class NearestAll(Detector):
+    """Distance from the reading (every sensor, standardised on the fitting data) to the nearest normal fitting
+    reading (k = 1), or the mean distance to the k nearest (k = 5). With more than 50,000 fitting readings, a
+    random 50,000 of them (seed 0) are the ones searched."""
+    name = "Nearest normal reading, all sensors (k = 1)"
+    CHUNK = 20_000_000          # distances computed at a time (rows x fitting readings)
+
+    def __init__(self, k: int = 1, max_fit: int = 50_000):
+        self.k, self.max_fit = k, max_fit
+        self.name = ("Nearest normal reading, all sensors (k = 1)" if k == 1
+                     else f"Nearest normal readings, all sensors (k = {k})")
+
+    def fit(self, X):
+        super().fit(X)
+        Z = self._z(X)
+        segs = _segments_of(len(X), self.context_.get("lengths"))
+        run = np.concatenate([np.full(b - a, i) for i, (a, b) in enumerate(segs)])
+        rng = np.random.default_rng(0)
+        idx = np.sort(rng.choice(len(Z), self.max_fit, replace=False)) if len(Z) > self.max_fit else np.arange(len(Z))
+        self.ref_, self.ref_run_ = Z[idx], run[idx]
+        self.ref32_ = self.ref_.astype(np.float32)
+        self.ref_sq_ = (self.ref32_ ** 2).sum(1)
+        # one overall scale (it changes no catch rate): up to 5,000 fitting readings against the other runs
+        # (or, with one run, against every other reading)
+        q = np.sort(rng.choice(len(Z), min(5000, len(Z)), replace=False))
+        if len(segs) > 1:
+            self.fit_scores_ = self._dist(Z[q], exclude_run=run[q])
+        else:
+            self.fit_scores_ = self._dist(Z[q], exclude_index=np.searchsorted(idx, q))
+        return self
+
+    def _dist(self, Q, exclude_run=None, exclude_index=None):
+        if exclude_index is None and _gpu() is not None:
+            return self._dist_gpu(Q, exclude_run)
+        out = np.empty(len(Q))
+        step = max(1, int(self.CHUNK // max(len(self.ref_), 1)))
+        k = min(self.k, len(self.ref_) - 1 if exclude_index is not None else len(self.ref_))
+        for i in range(0, len(Q), step):
+            q = Q[i:i + step]
+            # |q|^2 is the same along a row, so it is left out: the nearest readings do not change
+            d2 = q.astype(np.float32) @ self.ref32_.T
+            d2 *= -2.0
+            d2 += self.ref_sq_[None, :]
+            if exclude_run is not None:
+                d2[exclude_run[i:i + step, None] == self.ref_run_[None, :]] = np.inf
+            if exclude_index is not None:
+                hit = exclude_index[i:i + step]
+                rows = np.arange(len(q))
+                ok = hit < len(self.ref_)
+                d2[rows[ok], hit[ok]] = np.inf
+            if k == 1:
+                near = d2.argmin(1)[:, None]
+            else:
+                near = np.argpartition(d2, k - 1, axis=1)[:, :k] if k < d2.shape[1] else np.argsort(d2, axis=1)[:, :k]
+            exact = np.sqrt(((q[:, None, :] - self.ref_[near]) ** 2).sum(2))      # recomputed in full precision
+            out[i:i + step] = exact.mean(1)
+        return out
+
+    def _dist_gpu(self, Q, exclude_run=None):
+        torch, dev = _gpu()
+        if not hasattr(self, "_ref_t"):
+            self._ref_t = torch.as_tensor(self.ref32_, device=dev)
+            self._ref_sq_t = torch.as_tensor(self.ref_sq_, device=dev)
+            self._ref_run_t = torch.as_tensor(self.ref_run_, device=dev)
+        out = np.empty(len(Q))
+        step = max(1, int(self.CHUNK // max(len(self.ref_), 1)))
+        k = min(self.k, len(self.ref_))
+        for i in range(0, len(Q), step):
+            q = Q[i:i + step]
+            qt = torch.as_tensor(q.astype(np.float32), device=dev)
+            d2 = (qt ** 2).sum(1)[:, None] + self._ref_sq_t[None, :] - 2.0 * (qt @ self._ref_t.T)
+            if exclude_run is not None:
+                er = torch.as_tensor(exclude_run[i:i + step], device=dev)
+                d2[er[:, None] == self._ref_run_t[None, :]] = float("inf")
+            near = torch.topk(d2, k, dim=1, largest=False).indices.cpu().numpy()
+            out[i:i + step] = np.sqrt(((q[:, None, :] - self.ref_[near]) ** 2).sum(2)).mean(1)   # full precision
+        return out
+
+    def __getstate__(self):
+        return {k: v for k, v in self.__dict__.items() if not k.startswith("_ref_")}
+
+    def score(self, X):
+        return self._dist(self._z(X))
+
+    def score_fit(self, X):
+        return self.fit_scores_
+
+
+class NearestAll5(NearestAll):
+    name = "Nearest normal readings, all sensors (k = 5)"
+
+    def __init__(self, max_fit: int = 50_000):
+        super().__init__(k=5, max_fit=max_fit)
+
+
+class UnseenAll(UnseenValue):
+    """The unseen value check on every sensor that takes 30 or fewer distinct values in the fitting data (not
+    only the controller outputs)."""
+    name = "Unseen value check, all sensors"
+
+    def _outputs(self, d):
+        return list(range(d))
+
+
+def applicable_unseen(X: np.ndarray) -> list:
+    """The columns the unseen value check can use: 2 to 30 distinct values in the fitting data."""
+    return [j for j in range(X.shape[1]) if 1 < len(np.unique(X[:, j])) <= UnseenValue.MAX_VALUES]
+
+
+class DynamicPCA(PCA):
+    """PCA on each reading together with its previous `lags` readings (lags fixed at 2), scored like PCA. In the
+    fitting data the lagged rows never cross from one run into the next; when scoring, the first readings of a
+    run repeat its first reading as the missing past."""
+    name = "Dynamic PCA (2 lags)"
+
+    def __init__(self, lags: int = 2, var: float = 0.90):
+        super().__init__(var=var)
+        self.lags = lags
+
+    def _lagged(self, X):
+        P = np.vstack([np.repeat(X[:1], self.lags, axis=0), X])
+        return np.hstack([P[self.lags - i: len(P) - i] for i in range(self.lags + 1)])
+
+    def fit(self, X):
+        segs = _segments_of(len(X), self.context_.get("lengths"))
+        L = np.vstack([self._lagged(X[a:b])[self.lags:] for a, b in segs if b - a > self.lags])
+        return super().fit(L)
+
+    def score(self, X):
+        return super().score(self._lagged(X))
+
+    def residuals(self, X):
+        return super().residuals(self._lagged(X))
+
+
+class CVA(Detector):
+    """Canonical variate analysis, the Cranfield authors' method (cva.py) as a detector: past and future windows of
+    5 readings, 25 states kept (as in their example; fewer if the past window has fewer than 26 values), T2 and Q
+    each over its 99th percentile on the fitting data, and the larger of the two. Sensors that never move in the
+    fitting data are left out; a tiny ridge (1e-6) keeps the factors defined when sensors move together exactly.
+    The past window ends at the reading scored; the first readings of a run repeat its first reading."""
+    name = "CVA (T2 + Q)"
+
+    def __init__(self, p: int = 5, f: int = 5, n: int = 25):
+        self.p, self.f, self.n = p, f, n
+
+    def fit(self, X):
+        from . import cva
+        super().fit(X)
+        self.live_ = X.std(0) > 1e-9
+        segs = _segments_of(len(X), self.context_.get("lengths"))
+        train = [X[a:b][:, self.live_] for a, b in segs if b - a >= self.p + self.f + 1]
+        self.n_ = int(min(self.n, self.p * self.live_.sum() - 1))
+        self.model_ = cva.fit(train, self.p, self.f, self.n_, ridge=1e-6)
+        t2, q = cva.stats(self.model_, self.model_["Yp"])
+        self.ref_ = float(np.quantile(t2, 0.99)), float(np.quantile(q, 0.99))
+        del self.model_["Yp"]
+        return self
+
+    def _stats(self, X):
+        from . import cva
+        Xl = X[:, self.live_]
+        P = np.vstack([np.repeat(Xl[:1], self.p - 1, axis=0), Xl])
+        Y = (cva._past(P, self.p, 0) - self.model_["p_mean"]) / self.model_["p_std"]
+        return cva.stats(self.model_, Y)
+
+    def score(self, X):
+        t2, q = self._stats(X)
+        return np.maximum(t2 / max(self.ref_[0], 1e-12), q / max(self.ref_[1], 1e-12))
+
+
+class KernelPCA(Detector):
+    """Kernel PCA (a PCA that can bend): an RBF kernel on every sensor (standardised on the fitting data), fitted on
+    a random 3,000 fitting readings (seed 0), the bandwidth the median distance between them (the median
+    rule: k(x, y) = exp(-|x - y|^2 / (2 s^2)), s = that median). Components are kept by the PCA rule (90% of
+    the variance in the kernel's space). Scored like PCA: T2 on the kept components and SPE in the kernel's
+    space, each over its 99th percentile on fitting readings outside the 3,000 (up to 3,000 of them; on the
+    3,000 themselves if there are no others), and the larger of the two."""
+    name = "Kernel PCA (RBF)"
+    CHUNK = 4096
+
+    def __init__(self, sample: int = 3000, var: float = 0.90):
+        self.sample, self.var = sample, var
+
+    def _k(self, A):
+        d2 = (A ** 2).sum(1)[:, None] + self.s_sq_[None, :] - 2.0 * A @ self.S_.T
+        return np.exp(-np.maximum(d2, 0.0) / (2 * self.sigma_ ** 2))
+
+    def fit(self, X):
+        super().fit(X)
+        Z = self._z(X)
+        rng = np.random.default_rng(0)
+        idx = np.sort(rng.choice(len(Z), min(self.sample, len(Z)), replace=False))
+        self.S_ = Z[idx]
+        self.s_sq_ = (self.S_ ** 2).sum(1)
+        d2 = np.maximum(self.s_sq_[:, None] + self.s_sq_[None, :] - 2.0 * self.S_ @ self.S_.T, 0.0)
+        self.sigma_ = float(np.median(np.sqrt(d2[np.triu_indices(len(idx), 1)]))) or 1.0
+        K = np.exp(-d2 / (2 * self.sigma_ ** 2))
+        self.col_mean_, self.all_mean_ = K.mean(0), float(K.mean())
+        Kc = K - self.col_mean_[None, :] - self.col_mean_[:, None] + self.all_mean_
+        mu, V = np.linalg.eigh(Kc)
+        mu, V = mu[::-1], V[:, ::-1]
+        pos = mu > 1e-12 * mu[0]
+        mu, V = mu[pos], V[:, pos]
+        q = int(np.searchsorted(np.cumsum(mu) / mu.sum(), self.var) + 1)
+        self.q_ = max(1, min(q, len(mu) - 1 if len(mu) > 1 else 1))
+        self.alpha_ = V[:, :self.q_] / np.sqrt(mu[:self.q_])
+        self.lam_ = mu[:self.q_] / len(idx)
+        rest = np.setdiff1d(np.arange(len(Z)), idx)
+        ref = Z[np.sort(rng.choice(rest, min(self.sample, len(rest)), replace=False))] if len(rest) else self.S_
+        t2, spe = self._stats_z(ref)
+        self.ref_ = float(np.quantile(t2, 0.99)), float(np.quantile(spe, 0.99))
+        return self
+
+    def _stats_z(self, Z):
+        t2, spe = np.empty(len(Z)), np.empty(len(Z))
+        for i in range(0, len(Z), self.CHUNK):
+            Kt = self._k(Z[i:i + self.CHUNK])
+            row = Kt.mean(1, keepdims=True)
+            T = (Kt - row - self.col_mean_[None, :] + self.all_mean_) @ self.alpha_
+            t2[i:i + len(Kt)] = (T ** 2 / self.lam_).sum(1)
+            spe[i:i + len(Kt)] = np.maximum(1.0 - 2.0 * row[:, 0] + self.all_mean_ - (T ** 2).sum(1), 0.0)
+        return t2, spe
+
+    def score(self, X):
+        t2, spe = self._stats_z(self._z(X))
+        return np.maximum(t2 / max(self.ref_[0], 1e-12), spe / max(self.ref_[1], 1e-12))
+
+
+class RecipeHourStepped(RecipeAtHour):
+    """Recipe at this hour on the stepped controller outputs only: those with 30 or fewer distinct values in the
+    fitting data. FIX MADE AFTER SEEING RESULTS (round 4): the round-3 check also covered the cooling-water and
+    base-flow controllers, whose normal swings set its line far above the faults (notebook 09, section 12)."""
+    name = "Recipe at this hour, stepped outputs (fixed after seeing results)"
+
+    def fit(self, X):
+        cols = RecipeAtHour._outputs(self, X.shape[1])
+        self.stepped_ = [j for j in cols if 1 < len(np.unique(X[:, j])) <= UnseenValue.MAX_VALUES]
+        return super().fit(X)
+
+    def _outputs(self, d):
+        return self.stepped_
+
+
 REGISTRY = {
     "rolling_z": RollingZ,
     "ewma": EWMA,
@@ -670,6 +953,11 @@ REGISTRY = {
 }
 SCHEDULE_CHECKS = ["unseen_value", "nearest_1", "nearest_5", "recipe_hour"]
 REGISTRY.update({"link_straight_balanced": StraightLinkBalanced, "link_straight_told_balanced": StraightLinkStageToldBalanced})
+REGISTRY.update({"nearest_all_1": NearestAll, "nearest_all_5": NearestAll5, "unseen_all": UnseenAll, "dpca": DynamicPCA,
+                 "cva": CVA, "kpca": KernelPCA, "recipe_hour_stepped": RecipeHourStepped})
+# Round 4, part 2: the classic simple detectors, scored on every dataset ("unseen_all" only where some sensor takes 30
+# or fewer distinct values in the fitting data; "recipe_hour_stepped" only where controller outputs are named).
+CLASSIC = ["nearest_all_1", "nearest_all_5", "unseen_all", "dpca", "cva", "kpca"]
 
 
 def make(key: str, **params) -> Detector:
