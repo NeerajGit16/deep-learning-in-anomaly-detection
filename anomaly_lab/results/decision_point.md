@@ -87,3 +87,19 @@ What the +2.8 does contain is mostly level differences between visits to the sam
 ### Detectors on the six-mode plant (added 16 November, notebook 06 sections 13 to 18)
 
 The 168 faulty runs (one per fault per mode) were scored by detectors fitted on 24 normal runs, with one alarm line set on 6 other normal runs over the hours the faults cover. The straight-link and curved-link detectors tie, catching 0.46 of faulty readings each (ranges 0.41 to 0.52). The gap is within half a point of zero in every mode, including modes 3 and 6, where valves hit their limits. Both are ahead of every other detector (Matrix Profile is next at 0.32). False alarms before the faults are about 1 in 100, so the line carries over. On this plant, the curves that exist do not help catch faults.
+
+## Where the hypotheses stand (17 November 2026, after round 4)
+
+Each line: the hypothesis, where it stands, and the evidence. Numbers are catch rates at 1 false alarm in 100; a win needs 12 points with a range clear of zero.
+
+| Hypothesis | Where it stands | Evidence |
+|---|---|---|
+| Links between sensors bend once a plant runs at several settings | **Partly.** Clearly on two batch processes, not on continuous plants | Curved share +8 (metal etcher) and +15 (penicillin batches); +3 or less elsewhere. The bends are mostly corners, steps and switches of the control system; a straight model allowed a few corners recovers half to two thirds |
+| Flexible models of the links catch more faults than straight ones | **Not supported** | The curved-link and straight-link detectors tie on all six datasets (within 4 points), also after the fold audit (six-mode plant +3) |
+| Deep models beat simple detectors on plant data | **Not supported** | No deep model beats the best simple detector on any of the six datasets or the 11 generated faults; on three datasets the best deep model is behind by the margin (etcher −61, flow rig −14, penicillin batches −14) |
+| The autoencoder's win on the penicillin batches was depth | **Rejected** | It was knowing the recipe's schedule: the unseen value check ties it (0.645 against 0.639) and the nearest normal reading on all sensors beats it (0.78) |
+| A deep model wins where it should (positive control) | **Not shown with this setup** | On data built for a deep win, no deep model beat the best simple detector at any of 24 settings. The autoencoder needed 10,000 readings to match PCA on a flat surface and 50,000 to learn a bent one, where a link detector matched it. A limit of notebook 09's deep design, and of the generator (with 40 sensors its bends were flat for a straight line through the other sensors) |
+| Memory checks win where normal behaviour repeats exactly | **Partly; the repeat share does not predict it** | Memory checks win clearly on the etcher (unseen value check 0.95) and lead on the penicillin batches (nearest normal reading 0.78), where faults move a stepped setting to a value never seen. The repeat share is 0.96 to 1.00 on four datasets, and memory checks lose on three of them; it orders the datasets like the memory checks' gain in 7 of 15 pairs |
+| The curved share on normal data says in advance where flexible models gain | **Only against the straight-link detector** | Same order in 11 or 12 of 15 pairs for the gains over the straight-link detector; 3 of 15 for the gain over every simple detector. Six datasets: a picture, not a test |
+| Recent history (a forecaster) beats links on the six-mode plant | **Corrected** | Mostly a fold artefact: with balanced folds the link detectors catch 0.67 to 0.71 and the straight forecaster 0.69, a tie |
+| Alarm lines set on separate normal data carry over to the faulty runs | **Supported** | Before the fault, 1 of about 120 detector-and-dataset pairs exceeds 3% false alarms (isolation forest on the penicillin batches, 4.7%) |

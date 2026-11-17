@@ -41,11 +41,21 @@ uv run pytest                            # checks everything works
 | `07_metal_etch.ipynb` | A plasma etcher, wafer by wafer (a batch process): how curved its links are, and the detectors on its 21 faulty wafers |
 | `08_indpensim.ipynb` | A simulated penicillin fermentation, batch by batch (IndPenSim): how curved its links are, and the detectors on its 10 faulty batches |
 | `09_deep_models.ipynb` | Deep models (autoencoder, LSTM, GDN, USAD), each beside a simple twin, on all six datasets |
-| `10_across_datasets.ipynb` | All six datasets side by side: the curved share, the kinked share and three gaps in catching faults |
+| `10_across_datasets.ipynb` | All six datasets side by side: the curved share, the kinked share, the repeat share and three gaps in catching faults |
+| `11_indpensim_deep_dive.ipynb` | Why the autoencoder did well on the penicillin batches, ingredient by ingredient |
+| `12_mechanism_generator.ipynb` | Artificial batches with that ingredient on a dial |
+| `13_pensim_campaign.ipynb` | A generated campaign of 320 penicillin batches (PenSimPy) |
+| `14_positive_control.ipynb` | Artificial data built so that a deep model should win |
 | `adlab/data.py` | Loads SKAB, Tennessee Eastman (Braatz and Rieth files) and the Cranfield flow rig; plain-English sensor tables (`SKAB_INFO`, `TEP_INFO`, `CRANFIELD_INFO`) |
 | `adlab/explore.py` | Summary tables: faults per kind, how far each sensor moves, which sensors move together |
 | `adlab/plots.py` | All the figures |
-| `adlab/detectors.py` | The six simple detectors, plus the straight-link, curved-link and kinked-link residual detectors (and a straight-link one told the stage or mode) |
+| `adlab/detectors.py` | Every simple detector: the per-sensor checks, PCA, isolation forest, matrix profile, the link residual detectors (straight, curved, kinked, told the stage or mode), the schedule-aware checks and round 4's classic ones (nearest normal reading on all sensors, unseen value check, dynamic PCA, CVA, kernel PCA) |
+| `adlab/folds.py` | The fold audit and balanced folds (round 4) |
+| `adlab/round4.py` | Round 4's reports: the fold audit's changes, the classic detectors, false alarms before the fault, the repeat share |
+| `adlab/posctl.py` | The positive control's generator and reports (notebook 14) |
+| `adlab/deepdive.py`, `adlab/followup.py` | Notebook 11's ingredient detectors, and the follow-up checks of notebooks 09 and 11 |
+| `adlab/pensim.py`, `adlab/campaign.py` | Generating penicillin batches with PenSimPy (in its own environment), and the generated campaign's setups and reports |
+| `adlab/mechanism.py`, `adlab/authors_check.py` | Notebook 12's generator study; GDN and USAD against the authors' code |
 | `adlab/structure.py` | Curvature measure and fault labelling |
 | `adlab/cranfield.py` | The curvature measures for the Cranfield rig, whose runs each pass through many flow settings |
 | `adlab/multimode.py` | Fetches and loads the six-mode Tennessee Eastman runs, and puts its curvature measures together |
@@ -56,7 +66,7 @@ uv run pytest                            # checks everything works
 | `adlab/indpensim.py` | Downloads and loads the IndPenSim batches, says what each column is, and puts their measures and detectors together |
 | `adlab/etch.py` | Loads the metal etch wafers and puts their curvature measures and detectors together |
 | `adlab/remote.py` | Reads parts of a very large remote file without downloading all of it |
-| `adlab/cva.py` | The Cranfield authors' own monitoring method, ported from their example; used only to check we read their data as they do |
+| `adlab/cva.py` | The Cranfield authors' own monitoring method, ported from their example; first used to check we read their data as they do, and from round 4 also a detector on every dataset |
 | `adlab/simulate.py` | A first small simulator with a curvature dial |
 | `adlab/metrics.py` | Catch rate at a fixed false-alarm rate, and other scores. For Tennessee Eastman the alarm line is set on fault-free readings from the same hours of a run as the faults |
 | `adlab/stats.py` | How much of a result could be luck (resampling) |
