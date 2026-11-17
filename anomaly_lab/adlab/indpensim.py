@@ -329,6 +329,7 @@ CHANNELS = ["dissolved oxygen", "volume", "weight", "pH", "temperature", "CO2 of
             "O2 off-gas", "CO2 evolution",
             "aeration", "sugar feed", "acid flow", "base flow", "cooling water", "heating water", "dilution water",
             "head pressure", "broth dumped", "PAA flow", "oil flow"]
+OUTPUT_COLUMNS = [i for i, c in enumerate(CHANNELS) if {n: ro for n, ro, _ in COLUMNS}[c] == OUTPUT]
 LEFT_OUT_STILL = ["agitator", "ammonia shots"]           # controller outputs that never move in normal batches
 SLICES = 10
 STRATEGY_CODE = {"recipe": 0, "operator": 1, "APC": 2}
@@ -541,7 +542,8 @@ def detector_dataset(told: bool | str = False, raw: Path = RAW):
     name = {"stage": "indpensim_told", "strategy": "indpensim_strategy"}.get(extra, "indpensim")
     return Dataset(name, runs, CHANNELS + ([extra] if extra else []), 720.0, val,
                    calibration="matched", matched_start=0,
-                   fit_lengths=[len(b["X"]) for b, role in zip(bs, r) if role == "fit"])
+                   fit_lengths=[len(b["X"]) for b, role in zip(bs, r) if role == "fit"],
+                   output_columns=OUTPUT_COLUMNS, fit_groups=[b["strategy"] for b, role in zip(bs, r) if role == "fit"])
 
 
 TOLD_KEY = "link_straight_told"

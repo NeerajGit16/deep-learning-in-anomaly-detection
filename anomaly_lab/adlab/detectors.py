@@ -343,10 +343,14 @@ class LinkResidual(Detector):
         self.fit_scores_ = self._combine(err)
         return self
 
+    def _folds(self, n):
+        """The held-out folds that set each sensor's error scale: k blocks of time."""
+        return blocked_folds(n, self.k)
+
     def _held_out(self, Z, E):
         """Each sensor's prediction on blocks of time its models were not fitted on."""
         pred = np.zeros_like(Z)
-        for test in blocked_folds(len(Z), self.k):
+        for test in self._folds(len(Z)):
             train = np.setdiff1d(np.arange(len(Z)), test)
             for j, (others, _, _) in self.models_.items():
                 A = np.hstack([Z[:, others], E])
@@ -429,6 +433,225 @@ class StraightLinkStageTold(LinkResidual):
         return X[:, :-1], (X[:, -1][:, None] == self.stages_[None, :]).astype(float)
 
 
+# ---------------------------------------------------------------- schedule-aware checks (round 3, part 1)
+#
+# Fixed before computing. Simple, non-deep checks that know how controller outputs behave in normal
+# batches. They read from the dataset (passed in context_ like the batch lengths): which columns are
+# controller outputs ("outputs"; every column if none is given), the lengths of the batches joined into
+# the fitting data ("lengths"), and each fitting batch's group ("fit_groups", e.g. its control strategy).
+# Scores are one per reading and use only that reading (and, for the recipe check, its position in its
+# batch), so they are alarmed like every other detector. score_fit gives held-out scores: each fitting
+# batch scored against the others.
+
+def _segments_of(n, lengths):
+    if not lengths or sum(lengths) != n:
+        return [(0, n)]
+    edges = np.cumsum([0] + list(lengths))
+    return list(zip(edges[:-1].tolist(), edges[1:].tolist()))
+
+
+class _ScheduleCheck(Detector):
+    def __init__(self):
+        self.context_ = {}
+
+    def _outputs(self, d):
+        cols = self.context_.get("outputs")
+        return list(cols) if cols else list(range(d))
+
+    def score_fit(self, X):
+        return self.fit_scores_
+
+
+class UnseenValue(_ScheduleCheck):
+    """For each controller output that takes 30 or fewer distinct values in the fitting data: was the
+    reading's value ever seen there? A value counts as seen if it lies within 1e-6 of the output's range
+    (in the fitting data) of a seen value. Score: 0 if every such output's value was seen; otherwise the
+    largest, over those outputs, of the distance to the nearest seen value in units of the output's
+    standard deviation in the fitting data (so a value just off a seen one scores less than one far off)."""
+    name = "Unseen value check"
+    MAX_VALUES = 30
+    TOL = 1e-6
+
+    def _learn(self, X):
+        cols, seen, scale, tol = [], [], [], []
+        for j in self._outputs(X.shape[1]):
+            v = np.unique(X[:, j])
+            if 1 < len(v) <= self.MAX_VALUES:
+                cols.append(j)
+                seen.append(v)
+                scale.append(max(float(X[:, j].std()), 1e-12))
+                tol.append(self.TOL * float(v[-1] - v[0]) + 1e-12)
+        return cols, seen, scale, tol
+
+    def _score(self, X, learned):
+        cols, seen, scale, tol = learned
+        out = np.zeros(len(X))
+        for j, v, sc, t in zip(cols, seen, scale, tol):
+            x = X[:, j]
+            if len(v) == 1:
+                gap = np.abs(x - v[0])
+            else:
+                k = np.clip(np.searchsorted(v, x), 1, len(v) - 1)
+                gap = np.minimum(np.abs(x - v[k - 1]), np.abs(x - v[k]))
+            out = np.maximum(out, np.where(gap <= t, 0.0, gap / sc))
+        return out
+
+    def _held(self, X, a, b):
+        rest = np.vstack([X[:a], X[b:]])
+        cols, _, scale, tol = self.learned_
+        return cols, [np.unique(rest[:, j]) for j in cols], scale, tol
+
+    def fit(self, X):
+        super().fit(X)
+        self.learned_ = self._learn(X)
+        self.columns_ = self.learned_[0]
+        segs = _segments_of(len(X), self.context_.get("lengths"))
+        if len(segs) > 1:                           # each fitting batch against the values of the others
+            self.fit_scores_ = np.concatenate([self._score(X[a:b], self._held(X, a, b)) for a, b in segs])
+        else:
+            self.fit_scores_ = self._score(X, self.learned_)
+        return self
+
+    def score(self, X):
+        return self._score(X, self.learned_)
+
+
+class NearestNormal(_ScheduleCheck):
+    """Distance from the reading's controller outputs (standardised on the fitting data) to the nearest
+    normal fitting reading (k = 1), or the mean distance to the k nearest (k = 5)."""
+    name = "Nearest normal reading (k = 1)"
+
+    def __init__(self, k: int = 1):
+        super().__init__()
+        self.k = k
+        self.name = "Nearest normal reading (k = 1)" if k == 1 else f"Nearest normal readings (k = {k})"
+
+    def _tree(self, Z):
+        from sklearn.neighbors import KDTree
+        return KDTree(Z)
+
+    def _dist(self, tree, Z):
+        d, _ = tree.query(Z, k=self.k)
+        return d.mean(1)
+
+    def fit(self, X):
+        super().fit(X)
+        self.cols_ = self._outputs(X.shape[1])
+        Z = self._z(X)[:, self.cols_]
+        self.tree_ = self._tree(Z)
+        segs = _segments_of(len(X), self.context_.get("lengths"))
+        if len(segs) > 1:                           # each fitting batch against the others
+            self.fit_scores_ = np.concatenate([self._dist(self._tree(np.vstack([Z[:a], Z[b:]])), Z[a:b])
+                                               for a, b in segs])
+        else:
+            self.fit_scores_ = self._dist(self.tree_, Z)
+        return self
+
+    def score(self, X):
+        return self._dist(self.tree_, self._z(X)[:, self.cols_])
+
+
+class NearestNormal5(NearestNormal):
+    name = "Nearest normal readings (k = 5)"
+
+    def __init__(self):
+        super().__init__(k=5)
+
+
+class RecipeAtHour(_ScheduleCheck):
+    """For each controller output: the gap between the reading and the median of the normal recipe batches
+    in the fitting data at the same position in the batch (the same batch hour, one reading per step), over
+    their spread there (1.4826 x the median absolute deviation across those batches, at least 1% of the
+    output's standard deviation over the whole fitting data, so outputs that every recipe batch holds at the
+    same value still get a finite scale). Score: the largest scaled gap across outputs. Recipe batches are
+    the fitting batches whose group is "recipe" (all of them if no groups are given). Past the hour where
+    fewer than 3 recipe batches still run, the last hour with 3 is used. On batches not run by the recipe
+    (operators' random steps, the Raman-based controller) the outputs leave the recipe by design, so such
+    batches score high even when nothing is wrong."""
+    name = "Recipe at this hour"
+    MIN_BATCHES = 3
+    FLOOR = 0.01
+
+    def _profile(self, batches, floor):
+        n = max(len(b) for b in batches)
+        med, spread = [], []
+        for i in range(n):
+            rows = [b[i] for b in batches if len(b) > i]
+            if len(rows) < self.MIN_BATCHES:
+                break
+            R = np.vstack(rows)
+            m = np.median(R, axis=0)
+            med.append(m)
+            spread.append(np.maximum(1.4826 * np.median(np.abs(R - m), axis=0), floor))
+        return np.array(med), np.array(spread)
+
+    def _score(self, Xo, prof):
+        med, spread = prof
+        idx = np.minimum(np.arange(len(Xo)), len(med) - 1)
+        return (np.abs(Xo - med[idx]) / spread[idx]).max(1)
+
+    def fit(self, X):
+        super().fit(X)
+        self.cols_ = self._outputs(X.shape[1])
+        Xo = X[:, self.cols_]
+        floor = self.FLOOR * np.maximum(Xo.std(0), 1e-12)
+        segs = _segments_of(len(X), self.context_.get("lengths"))
+        groups = self.context_.get("fit_groups")
+        use_groups = bool(groups) and len(groups) == len(segs)
+        recipe = [i for i in range(len(segs)) if not use_groups or groups[i] == "recipe"]
+        batches = [Xo[a:b] for a, b in segs]
+        self.profile_ = self._profile([batches[i] for i in recipe], floor)
+        scores = []
+        for i, b in enumerate(batches):               # held out: a recipe batch against the other recipe batches
+            if i in recipe and len(recipe) > self.MIN_BATCHES:
+                prof = self._profile([batches[j] for j in recipe if j != i], floor)
+            else:
+                prof = self.profile_
+            scores.append(self._score(b, prof))
+        self.fit_scores_ = np.concatenate(scores)
+        return self
+
+    def score(self, X):
+        return self._score(X[:, self.cols_], self.profile_)
+
+
+# ---------------------------------------------------------------- round 3, part 4: balanced folds
+
+class _BalancedFolds:
+    """The error scale set on folds that each hold out one run of every group (e.g. one run of every operating
+    mode), so every group is always in the fitted part. Needs the fitting runs' lengths and groups (context_);
+    without them, the k blocks of time as before."""
+
+    def _folds(self, n):
+        segs = _segments_of(n, self.context_.get("lengths"))
+        groups = self.context_.get("fit_groups")
+        if not groups or len(groups) != len(segs):
+            return blocked_folds(n, self.k)
+        fold, seen = np.empty(n, int), {}
+        for (a, b), g in zip(segs, groups):
+            fold[a:b] = seen.get(g, 0)
+            seen[g] = seen.get(g, 0) + 1
+        return [np.flatnonzero(fold == f) for f in range(max(seen.values()))]
+
+
+class StraightLinkBalanced(_BalancedFolds, StraightLinkResidual):
+    name = "Straight-link residual, balanced folds"
+
+    def __init__(self, window: int = 5, k: int = 5):
+        super().__init__(window=window, k=k)
+        self.name = type(self).name
+        self.context_ = {}
+
+
+class StraightLinkStageToldBalanced(_BalancedFolds, StraightLinkStageTold):
+    name = "Straight-link residual, stage told, balanced folds"
+
+    def __init__(self, window: int = 5, k: int = 5):
+        super().__init__(window=window, k=k)
+        self.name = type(self).name
+        self.context_ = {}
+
+
 REGISTRY = {
     "rolling_z": RollingZ,
     "ewma": EWMA,
@@ -440,7 +663,13 @@ REGISTRY = {
     "link_curved": CurvedLinkResidual,
     "link_straight_told": StraightLinkStageTold,
     "link_kinked": KinkedLinkResidual,
+    "unseen_value": UnseenValue,
+    "nearest_1": NearestNormal,
+    "nearest_5": NearestNormal5,
+    "recipe_hour": RecipeAtHour,
 }
+SCHEDULE_CHECKS = ["unseen_value", "nearest_1", "nearest_5", "recipe_hour"]
+REGISTRY.update({"link_straight_balanced": StraightLinkBalanced, "link_straight_told_balanced": StraightLinkStageToldBalanced})
 
 
 def make(key: str, **params) -> Detector:

@@ -40,7 +40,7 @@ def straight_side() -> list[str]:
     stage- or mode-told straight-link detectors."""
     from . import deep
     from . import detectors as det
-    return [det.REGISTRY[k].name for k in deep.SIMPLE if det.REGISTRY[k].name not in FLEXIBLE]
+    return [det.REGISTRY[k].name for k in deep.SIMPLE_ALL if det.REGISTRY[k].name not in FLEXIBLE]
 
 
 def design(name: str) -> dict:

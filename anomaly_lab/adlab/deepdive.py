@@ -84,6 +84,8 @@ def readings_table(seed: int = 0) -> pd.DataFrame:
     ae_runs, ae_thr = _line("deep_ae", seed)
     cl_runs, cl_thr = _line("link_curved", 0)
     pt_runs, pt_thr = _line("pca_twin", 0)
+    uv_runs, uv_thr = _line("unseen_value", 0)               # round 3: two schedule-aware checks
+    nn_runs, nn_thr = _line("nearest_1", 0)
     bs = {b["batch"]: b for b in indpensim.batches()}
     rows = []
     for i, r in enumerate(ds.runs):
@@ -95,7 +97,9 @@ def readings_table(seed: int = 0) -> pd.DataFrame:
             rows.append({"batch": b, "hour": float(t[k]), "stage": f"{10 * stage[k]}-{10 * stage[k] + 10}%",
                          "sugar feed": float(r.X[k, indpensim.CHANNELS.index("sugar feed")]),
                          "autoencoder alarms": bool(ae_runs[i][k] > ae_thr), "curved-link alarms": bool(cl_runs[i][k] > cl_thr),
-                         "PCA scored alike alarms": bool(pt_runs[i][k] > pt_thr), "index": int(k)})
+                         "PCA scored alike alarms": bool(pt_runs[i][k] > pt_thr),
+                         "unseen value check alarms (round 3)": bool(uv_runs[i][k] > uv_thr),
+                         "nearest normal reading alarms (round 3)": bool(nn_runs[i][k] > nn_thr), "index": int(k)})
     out = pd.DataFrame(rows)
     out["stretch"] = pd.cut(out["hour"], [0, 50, 150, 300], labels=["20-30 h (sugar feed held at 2)",
                                                                      "76-92 h (held at 20)", "200-214 h (held at 20)"])
@@ -110,7 +114,9 @@ def when_table(seed: int = 0) -> pd.DataFrame:
     return pd.DataFrame({"faulty readings": g.size(), "stage": g["stage"].agg(lambda s: ", ".join(sorted(set(s)))),
                          "autoencoder": g["autoencoder alarms"].mean(), "curved-link": g["curved-link alarms"].mean(),
                          "PCA scored alike": g["PCA scored alike alarms"].mean(),
-                         "autoencoder only": g["autoencoder only"].mean()})
+                         "autoencoder only": g["autoencoder only"].mean(),
+                         "unseen value check (round 3)": g["unseen value check alarms (round 3)"].mean(),
+                         "nearest normal reading (round 3)": g["nearest normal reading alarms (round 3)"].mean()})
 
 
 def drivers(seed: int = 0) -> pd.DataFrame:
@@ -495,8 +501,8 @@ def ingredient_report(only_win: bool = False, n_boot: int = 1000) -> dict:
     ds = indpensim.detector_dataset()
     keep = [r.meta["batch"] in WIN for r in ds.runs] if only_win else None
     sources = {k: d for k, d in ingredient_datasets().items() if k in SOURCES}
-    methods = ["deep_ae", "pca_twin", "link_curved"] + list(INGREDIENTS)
-    return structure.cached(f"deepdive_ingredients__{'win' if only_win else 'all'}", lambda: run.report_dataset(
+    methods = ["deep_ae", "pca_twin", "link_curved"] + list(INGREDIENTS) + deep.SCHEDULE    # round 3: with the checks
+    return structure.cached(f"deepdive_ingredients__{'win' if only_win else 'all'}__with_schedule_checks", lambda: run.report_dataset(
         ds, methods, deep.SEEDS, n_boot, keep=keep, calibration="matched", verbose=False, sources=sources))
 
 

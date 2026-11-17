@@ -45,6 +45,10 @@ EXTRA_METHODS = {
     "deep_ae": {}, "deep_lstm": {}, "deep_gdn": {}, "deep_gdn_paper": {}, "deep_usad": {},
     "straight_forecaster": {},
     "pca_twin": {},          # added after the first deep-model results: PCA scored like the autoencoder
+    # round 3: schedule-aware simple checks (detectors.py); they read the dataset's controller outputs
+    "unseen_value": {}, "nearest_1": {}, "nearest_5": {}, "recipe_hour": {},
+    # round 3, part 4: the straight-link detector (and told the mode) with its error scale on balanced folds
+    "link_straight_balanced": {"window": 5}, "link_straight_told_balanced": {"window": 5},
 }
 FAR = 0.01
 # A gap between two methods smaller than this is not called a win. It is a fixed number, so it
@@ -82,7 +86,9 @@ def score_dataset(ds: D.Dataset, method: str, seed: int, verbose: bool = True) -
         if key not in fitted:
             model = det.make(method, **params)
             if hasattr(model, "context_"):        # models that hold data aside whole runs at a time, and log
-                model.context_ = {"dataset": ds.name, "run": run.name, "lengths": ds.fit_lengths}
+                model.context_ = {"dataset": ds.name, "run": run.name, "lengths": ds.fit_lengths,
+                                  "outputs": ds.output_columns, "fit_groups": ds.fit_groups,
+                                  "settings": ds.deep_settings}
             model.fit(run.fit)
             fitted[key] = (model, model.score_fit(run.fit))
         model, fit_scores = fitted[key]

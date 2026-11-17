@@ -66,6 +66,12 @@ class Dataset:
     # Lengths of the runs joined end to end into the fit data, when every run shares one fit array.
     # Models that hold whole runs aside (deep.py) use it; None means one stretch.
     fit_lengths: list | None = None
+    # Which columns are controller outputs (settings a control system moves), for the schedule-aware
+    # checks; None means every column. Each fitting batch's group (e.g. its control strategy), in the
+    # order of fit_lengths. Fixed settings for deep models ({family: setting}) instead of choosing them.
+    output_columns: list | None = None
+    fit_groups: list | None = None
+    deep_settings: dict | None = None
 
     def calibration_runs(self) -> list[Run]:
         """The fault-free runs that set the alarm line under "matched" calibration."""

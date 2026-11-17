@@ -311,7 +311,10 @@ class DeepDetector(Detector):
         # the error of simply predicting each sensor's average (from the training part), on held-aside data
         self.baseline_error_ = float(np.mean((Z[aside] - Z[train].mean(0)) ** 2))
         choice_file = self._store(X, "choice.json")
-        if choice_file.exists():
+        fixed = (self.context_.get("settings") or {}).get(self.family)
+        if fixed is not None:                       # round 3: a setting fixed for this dataset (no choosing)
+            choice = {"setting": dict(fixed), "tried": [], "fixed": True}
+        elif choice_file.exists():
             choice = json.loads(choice_file.read_text())
         else:                                       # choose the setting with seed 0, on held-aside data only
             keep_seed, self.seed = self.seed, 0
@@ -584,6 +587,9 @@ class StraightForecaster(Detector):
         train_segs, aside_segs = split_aside(segments(len(Z), self.context_.get("lengths")))
         best = None
         options = windows_for(self.context_.get("dataset"))
+        fixed = (self.context_.get("settings") or {}).get("straight_forecaster")
+        if fixed is not None:                       # round 3: a window fixed for this dataset (no choosing)
+            options = (fixed["W"],)
         usable = [w for w in options if len(ends(train_segs, w, True)) and len(ends(aside_segs, w, True))] or [min(options)]
         for w in usable:
             tr, ho = ends(train_segs, w, True), ends(aside_segs, w, True)
@@ -673,6 +679,17 @@ TWIN_NAMES = {"deep_ae": "PCA (T2 + SPE)", "deep_lstm": "Straight forecaster", "
               "deep_gdn_paper": "Straight-link residual", "deep_usad": "Autoencoder"}
 SIMPLE = ["rolling_z", "ewma", "cusum", "pca", "iforest", "matrix_profile", "link_straight", "link_curved",
           "link_straight_told", "link_kinked", "straight_forecaster", "pca_twin"]
+# Round 3: the schedule-aware checks (detectors.SCHEDULE_CHECKS) are simple detectors too. They are scored
+# on datasets that name their controller outputs (IndPenSim), and count towards "best simple" there.
+SCHEDULE = ["unseen_value", "nearest_1", "nearest_5", "recipe_hour"]
+# Round 3, part 4: on the six-mode plant, the straight-link detector (plain and told the mode) with its error
+# scale set on folds that keep every mode.
+BALANCED = {"tep6": ["link_straight_balanced", "link_straight_told_balanced"]}
+SIMPLE_ALL = SIMPLE + SCHEDULE + ["link_straight_balanced", "link_straight_told_balanced"]
+
+
+def _schedule(spec) -> list:
+    return SCHEDULE if spec["ds"].output_columns else []
 
 
 def dataset(name: str):
@@ -690,8 +707,8 @@ def dataset(name: str):
         return {"ds": data.load_cranfield(), "calibration": "per_run", "sources": {}, "also": []}
     if name == "tep6":
         told = multimode.detector_dataset(told=True)
-        return {"ds": multimode.detector_dataset(), "calibration": "matched", "sources": {"link_straight_told": told},
-                "also": [told]}
+        return {"ds": multimode.detector_dataset(), "calibration": "matched",
+                "sources": {"link_straight_told": told, "link_straight_told_balanced": told}, "also": [told]}
     if name == "indpensim":
         told = indpensim.detector_dataset(told=True)
         return {"ds": indpensim.detector_dataset(), "calibration": "matched", "sources": {"link_straight_told": told},
@@ -710,8 +727,14 @@ def score(name: str, verbose: bool = True):
     for ds in [spec["ds"]] + [d for d in spec["also"] if d is not None and not d.name.endswith("_told")]:
         run.score_all([ds], methods=standard, n_seeds=5, verbose=verbose)            # cached already, except new datasets
         run.score_all([ds], methods=["link_kinked", "straight_forecaster"] + keep, n_seeds=SEEDS, verbose=verbose)
+        if ds.output_columns:
+            run.score_all([ds], methods=SCHEDULE, n_seeds=1, verbose=verbose)
+        extra = [m for m in BALANCED.get(name, []) if m not in spec["sources"]]
+        if extra:
+            run.score_all([ds], methods=extra, n_seeds=1, verbose=verbose)
     for ds in [d for d in spec["also"] if d is not None and d.name.endswith("_told")]:
-        run.score_all([ds], methods=["link_straight_told"], verbose=verbose)
+        run.score_all([ds], methods=["link_straight_told"] + [m for m in BALANCED.get(name, []) if m in spec["sources"]],
+                      verbose=verbose)
     progress.note(f"deep models: {name} done")
 
 
@@ -720,7 +743,8 @@ def report(name: str, n_boot: int = 1000, verbose: bool = True) -> dict:
     from . import etch, run, structure
     spec = dataset(name)
     keep = self_checks()["keep"]
-    methods = [m for m in SIMPLE + keep if m != "link_straight_told" or spec["sources"] or name == "etch"]
+    methods = [m for m in SIMPLE + _schedule(spec) + BALANCED.get(name, []) + keep
+               if m != "link_straight_told" or spec["sources"] or name == "etch"]
 
     def compute():
         if name == "etch":
@@ -738,7 +762,8 @@ def report(name: str, n_boot: int = 1000, verbose: bool = True) -> dict:
         return run.report_dataset(spec["ds"], methods, 5, n_boot, calibration=spec["calibration"], verbose=verbose,
                                   sources=spec["sources"])
 
-    return structure.cached(f"deep_report__{name}", compute)
+    return structure.cached(f"deep_report__{name}" + ("__with_schedule_checks" if _schedule(spec) else "")
+                            + ("__with_balanced_folds" if name in BALANCED else ""), compute)
 
 
 def _summary(res: dict):
@@ -771,7 +796,7 @@ def table(res: dict) -> "pd.DataFrame":
     s = _summary(res)
     # Every detector that is not deep. Follow-up round: the PCA scored like the autoencoder (added after
     # seeing results) now counts too; it is never the best, so no number here changed.
-    simple = [det.REGISTRY[k].name for k in SIMPLE if det.REGISTRY[k].name in s.index]
+    simple = [det.REGISTRY[k].name for k in SIMPLE_ALL if det.REGISTRY[k].name in s.index]
     best = s.loc[simple, "dr_at_1pct"].idxmax()
     rows = {}
     for key in DEEP:

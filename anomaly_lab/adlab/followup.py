@@ -27,7 +27,7 @@ CURVED, STRAIGHT, KINKED, PCA_TWIN = ("Curved-link residual", "Straight-link res
 def _ips():
     from . import deep
     spec = deep.dataset("indpensim")
-    methods = deep.SIMPLE + deep.self_checks()["keep"]
+    methods = deep.SIMPLE + deep.SCHEDULE + deep.self_checks()["keep"]          # round 3: with the schedule checks
     return spec, methods
 
 
@@ -35,7 +35,7 @@ def _best_simple(res: dict) -> str:
     from . import deep
     from . import detectors as det
     s = deep._summary(res)["dr_at_1pct"]
-    simple = [det.REGISTRY[k].name for k in deep.SIMPLE if det.REGISTRY[k].name in s.index]
+    simple = [det.REGISTRY[k].name for k in deep.SIMPLE_ALL if det.REGISTRY[k].name in s.index]
     return s[simple].idxmax()
 
 
@@ -50,7 +50,7 @@ def ips_report(leave_out: int | None = None, line: str = "all", n_boot: int = 10
         return deep.report("indpensim")
     keep = [r.meta["batch"] != leave_out for r in ds.runs]
     line_keep = None if line == "all" else [r.meta["strategy"] == line for r in ds.val_normal]
-    return structure.cached(f"followup_ips__without_{leave_out}__line_{line}", lambda: run.report_dataset(
+    return structure.cached(f"followup_ips__without_{leave_out}__line_{line}__with_schedule_checks", lambda: run.report_dataset(
         ds, methods, 5, n_boot, keep=keep, calibration="matched", verbose=False, sources=spec["sources"],
         line_keep=line_keep))
 
@@ -86,7 +86,8 @@ def ips_by_batch() -> pd.DataFrame:
     labels = [r.y for r in ds.runs]
     names = [r.meta["batch"] for r in ds.runs]
     keys = {AE: "deep_ae", CURVED: "link_curved", STRAIGHT: "link_straight", KINKED: "link_kinked", PCA_TWIN: "pca_twin",
-            "Straight forecaster": "straight_forecaster", "LSTM forecaster": "deep_lstm"}
+            "Straight forecaster": "straight_forecaster", "LSTM forecaster": "deep_lstm",
+            "Unseen value check": "unseen_value", "Nearest normal reading (k = 1)": "nearest_1"}
     cols = {}
     for label, key in keys.items():
         seeds = run._seeds(key, deep.SEEDS if key in deep.DEEP else 5)
@@ -97,7 +98,7 @@ def ips_by_batch() -> pd.DataFrame:
             per.append(M.dr_by_group(runs, labels, names, thr))
         cols[det.REGISTRY[key].name] = pd.DataFrame(per).mean()
     every = {}
-    for key in deep.SIMPLE:                       # the best of every simple detector, batch by batch
+    for key in deep.SIMPLE_ALL:                   # the best of every simple detector, batch by batch
         src = spec["sources"].get(key, ds)
         if not run._cache_path(src.name, key, 0).exists():
             continue
@@ -140,7 +141,7 @@ def ips_per_seed(n_boot: int = 1000) -> pd.DataFrame:
         labels = [r.y for r in ds.runs]
         res = deep.report("indpensim")
         best = _best_simple(res)
-        best_key = next(k for k in deep.SIMPLE if det.REGISTRY[k].name == best)
+        best_key = next(k for k in deep.SIMPLE_ALL if det.REGISTRY[k].name == best)
         rows = {}
         for seed in range(deep.SEEDS):
             primary, calib = {}, {}
@@ -160,7 +161,7 @@ def ips_per_seed(n_boot: int = 1000) -> pd.DataFrame:
         out.index.name = "autoencoder seed"
         return out
 
-    return structure.cached("followup_ips__per_seed", compute)
+    return structure.cached("followup_ips__per_seed__with_schedule_checks", compute)
 
 
 def ips_summary() -> pd.DataFrame:
@@ -358,3 +359,87 @@ def mode_told_folds() -> pd.DataFrame:
         return {"blocks": blocks_table, "spreads": compare}
 
     return structure.cached("followup_six_mode_told_folds", compute)
+
+
+# ---------------------------------------------------------------- round 3, part 1: schedule-aware checks on IndPenSim
+
+def schedule_checks_table() -> pd.DataFrame:
+    """Each schedule-aware check on IndPenSim (notebook 08's setup): catch rate with range, false alarms on the
+    faulty batches' own normal readings, and the autoencoder minus it, under the line from all 30 line batches
+    and under the line from the 10 recipe line batches."""
+    from . import deep
+    from . import detectors as det
+    rows = {}
+    for line in ("all", "recipe"):
+        res = ips_report(line=line)
+        s = deep._summary(res)
+        for key in deep.SCHEDULE:
+            m = det.REGISTRY[key].name
+            g = deep.gap(res, AE, m)
+            rows[(m, "one line for all strategies" if line == "all" else "line from the recipe batches")] = {
+                "caught": s.loc[m, "dr_at_1pct"], "range": f"{s.loc[m, 'dr_ci90_low']:.2f}-{s.loc[m, 'dr_ci90_high']:.2f}",
+                "false alarms on the faulty batches' normal readings": s.loc[m, "far_own_normal"],
+                "autoencoder caught": s.loc[AE, "dr_at_1pct"], "autoencoder minus it, points": 100 * g["gap"],
+                "gap range": f"{100 * g['low']:+.1f} to {100 * g['high']:+.1f}",
+                "within 12 points of the autoencoder": abs(100 * g["gap"]) < 12}
+    out = pd.DataFrame(rows).T
+    out.index.names = ["check", "alarm line"]
+    return out
+
+
+def recipe_hour_on_normal() -> pd.DataFrame:
+    """Why the recipe-at-this-hour check misses: on the 30 normal line batches, the 99th percentile of its score
+    and the output that most often gives the largest gap, by control strategy (normal data only)."""
+    from . import detectors as det
+    from . import indpensim
+    ds = indpensim.detector_dataset()
+    m = det.RecipeAtHour()
+    m.context_ = {"lengths": ds.fit_lengths, "outputs": ds.output_columns, "fit_groups": ds.fit_groups}
+    m.fit(ds.runs[0].fit)
+    names = [indpensim.CHANNELS[i] for i in m.cols_]
+    med, spread = m.profile_
+    rows = []
+    for r in ds.val_normal:
+        Xo = r.X[:, m.cols_]
+        idx = np.minimum(np.arange(len(Xo)), len(med) - 1)
+        S = np.abs(Xo - med[idx]) / spread[idx]
+        rows.append({"strategy": r.meta["strategy"], "99th percentile of the score": float(np.quantile(S.max(1), 0.99)),
+                     "output giving the largest gap most often": names[int(np.bincount(S.argmax(1), minlength=len(names)).argmax())]})
+    t = pd.DataFrame(rows)
+    out = t.groupby("strategy").agg(**{"line batches": ("strategy", "size"),
+                                       "median of the 99th percentiles": ("99th percentile of the score", "median"),
+                                       "commonest driver": ("output giving the largest gap most often", lambda s: s.value_counts().index[0])})
+    # the substrate fault for comparison: the score on the three batches' 76-92 h readings
+    fault = []
+    for r in ds.runs:
+        if r.meta["batch"] in (91, 95, 97):
+            Xo = r.X[:, m.cols_]
+            idx = np.minimum(np.arange(len(Xo)), len(med) - 1)
+            S = (np.abs(Xo - med[idx]) / spread[idx]).max(1)
+            t_h = np.arange(len(Xo)) * 0.2 + 0.2
+            fault.append(np.median(S[(t_h >= 76) & (t_h <= 92)]))
+    out.attrs["median score, faulty readings at 76-92 h (batches 91, 95, 97)"] = float(np.median(fault))
+    return out
+
+
+# ---------------------------------------------------------------- round 3, part 4: balanced folds on the six-mode plant
+
+def balanced_folds_table() -> pd.DataFrame:
+    """The straight-link detector, plain and told the mode, with its error scale set on the old blocks of time and
+    on balanced folds (one run of every mode held out at a time), beside the straight forecaster; six-mode plant."""
+    from . import deep
+    res = deep.report("tep6", verbose=False)
+    s = deep._summary(res)
+    names = ["Straight-link residual", "Straight-link residual, stage told", "Straight-link residual, balanced folds",
+             "Straight-link residual, stage told, balanced folds", "Straight forecaster", "LSTM forecaster", "Autoencoder"]
+    rows = {}
+    for m in names:
+        g = deep.gap(res, m, "Straight-link residual") if m != "Straight-link residual" else None
+        rows[m.replace("stage told", "mode told")] = {
+            "caught": s.loc[m, "dr_at_1pct"], "range": f"{s.loc[m, 'dr_ci90_low']:.2f}-{s.loc[m, 'dr_ci90_high']:.2f}",
+            "false alarms before the faults": s.loc[m, "far_own_normal"],
+            "minus the straight-link (blocks), points": 100 * g["gap"] if g else 0.0,
+            "range of that gap": f"{100 * g['low']:+.1f} to {100 * g['high']:+.1f}" if g else ""}
+    out = pd.DataFrame(rows).T
+    out.index.name = "detector"
+    return out
