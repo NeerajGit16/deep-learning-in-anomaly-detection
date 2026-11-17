@@ -646,7 +646,9 @@ def over_time_with_faults(normal: list, faulty: list, channels: list, names: lis
         for k, (t, X) in enumerate(normal):
             ax.plot(t, X[:, j], color=BLUE, lw=0.6, alpha=0.35, label="normal recipe batches" if k == 0 else None)
         for k, (t, X) in enumerate(faulty):
-            ax.plot(t, X[:, j], color=ORANGE, lw=1.1, label=(faulty_names[k] if faulty_names else "faulty batches" if k == 0 else None))
+            label = (faulty_names[k] if faulty_names and k < len(faulty_names) else
+                     None if faulty_names or k > 0 else "faulty batches")
+            ax.plot(t, X[:, j], color=ORANGE, lw=1.1, label=label)
         if shade:
             ax.axvspan(*shade, color=GRID, alpha=0.6, lw=0)
         ax.set_title(_wrap(describe.get(c, c), 46), fontsize=9)
