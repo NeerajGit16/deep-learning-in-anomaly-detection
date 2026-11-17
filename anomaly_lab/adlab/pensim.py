@@ -2,7 +2,8 @@
 
 PenSimPy (github.com/Mohan-Zhang-u/PenSimPy, MIT licence, version 1.2.5 on PyPI) is a Python port of the
 IndPenSim simulator. It expects a C++ extension, fastodeint, that is not on PyPI and needs C++ build tools.
-Its pure-Python path (PenSimEnv(fast=False)) does not run as published; three changes make it run here:
+Its pure-Python path (PenSimEnv(fast=False)) does not run as published; three changes make it run here
+(and a fourth, found in round 3, gives its operator-run batches their random steps; see _LatestList):
 
 1. fastodeint is replaced by a stand-in module that is never called (fast=False is used).
 2. The ODE solver: SciPy's Dormand-Prince (RK45) with tolerances 1e-6, the solver fastodeint uses
@@ -71,8 +72,83 @@ class _Solver:
         return sol.y.T
 
 
-def generate(seed: int, fault: int = 0, strategy: str = "recipe") -> pd.DataFrame:
-    """One batch: time (h), the 20 channels of notebook 08 and the fault flag. Needs PenSimPy (own environment)."""
+# The substrate feed fault's hours, as the simulator codes them (steps of 0.2 h, inclusive): 20-30, 76-92, 200-214 h.
+SUGAR_STRETCHES = [(100, 150), (380, 460), (1000, 1070)]
+FAULT_A = {"kind": "held", "values": [2.0, 20.0, 20.0]}          # as published (the simulator's own fault 3)
+# Round 3, fault B, fixed before generating: held at values the recipe uses at other times, the recipe value
+# nearest fault A's (8 L/h is its value at 0-3 h, 15 L/h at 3-12 h).
+FAULT_B = {"kind": "held", "values": [8.0, 15.0, 15.0]}
+LENGTH_MEAN, LENGTH_SD = 230, 25                                 # batch length (h), as the MATLAB original draws it
+
+
+def batch_hours(seed: int) -> int:
+    """A batch's length in hours: round(230 + 25 x a normal draw), from its own generator (seed + 7777)."""
+    return int(round(LENGTH_MEAN + LENGTH_SD * np.random.RandomState(seed + 7777).randn()))
+
+
+def _set_length(hours: float):
+    """PenSimPy reads its batch length from module constants at run time: set them for this batch."""
+    import pensimpy.constants as K
+    import pensimpy.data.batch_data as BD
+    import pensimpy.peni_env_setup as setup
+    import pensimpy.utils as U
+    steps = int(round(hours * K.MINUTES_PER_HOUR / K.STEP_IN_MINUTES))
+    for mod in (K, BD, setup, U):
+        if hasattr(mod, "NUM_STEPS"):
+            mod.NUM_STEPS = steps
+        if hasattr(mod, "BATCH_LENGTH_IN_HOURS"):
+            mod.BATCH_LENGTH_IN_HOURS = hours
+        if hasattr(mod, "BATCH_LENGTH_IN_MINUTES"):
+            mod.BATCH_LENGTH_IN_MINUTES = hours * K.MINUTES_PER_HOUR
+    return steps
+
+
+class _LatestList(list):
+    """Round 3, fix 4. PenSimPy's operator mode stores each random step at PRBS_noise_addition[k - 1] of a list
+    made at full length, then adds PRBS_noise_addition[-1], the list's last slot, which is always 0: so its
+    operator batches never step. Here [-1] returns the most recently stored step, as the MATLAB original intends
+    (there the list grows, so its last element is the latest)."""
+
+    def __init__(self, n):
+        super().__init__([0] * n)
+        self.latest = 0
+
+    def __setitem__(self, i, v):
+        super().__setitem__(i, v)
+        self.latest = v
+
+    def __getitem__(self, i):
+        return self.latest if i == -1 else super().__getitem__(i)
+
+
+class _SugarOverride:
+    """Wraps a RecipeCombo: during the substrate feed fault's stretches, the sugar feed the recipe hands the
+    controller is held at a value ("held") or scaled ("scale"). Equivalent to the simulator's own fault 3 for
+    recipe-driven batches, which also replaces the recipe's sugar feed at those steps."""
+
+    def __init__(self, combo, variant):
+        self.combo, self.variant = combo, variant
+
+    def get_values_dict_at(self, time):
+        values = self.combo.get_values_dict_at(time=time)
+        k = int(round(time / 0.2))
+        for i, (a, b) in enumerate(SUGAR_STRETCHES):
+            if a <= k <= b:
+                if self.variant["kind"] == "held":
+                    values["Fs"] = self.variant["values"][i]
+                else:
+                    values["Fs"] = values["Fs"] * self.variant["factor"]
+        return values
+
+
+def generate(seed: int, fault: int = 0, strategy: str = "recipe", hours: float | str | None = None,
+             sugar: dict | None = None) -> pd.DataFrame:
+    """One batch: time (h), the 20 channels of notebook 08 and the fault flag. Needs PenSimPy (own environment).
+
+    fault: the simulator's own fault number (0 none, 1 aeration, 2 back pressure, 3 substrate feed, 4 base flow,
+    5 coolant flow). sugar: a substrate feed variant applied through the recipe instead ({"kind": "held",
+    "values": [three values]} or {"kind": "scale", "factor": f}); its fault flag is set over SUGAR_STRETCHES.
+    hours: None for PenSimPy's 230 h, a number, or "vary" for batch_hours(seed)."""
     import sys
     stub = Path(__file__).resolve().parent / "_fastodeint_stub"
     if str(stub) not in sys.path:
@@ -81,8 +157,11 @@ def generate(seed: int, fault: int = 0, strategy: str = "recipe") -> pd.DataFram
     from pensimpy.data import constants as C
     from pensimpy.examples.recipe import Recipe, RecipeCombo
 
+    length = batch_hours(seed) if hours == "vary" else (230 if hours is None else hours)
+    steps = _set_length(length)
     captured = {}
-    original = setup.get_dataframe
+    original = getattr(setup, "_adlab_original_get_dataframe", setup.get_dataframe)
+    setup._adlab_original_get_dataframe = original
 
     def keep(batch_data, include_raman):
         captured["x"] = batch_data
@@ -93,27 +172,112 @@ def generate(seed: int, fault: int = 0, strategy: str = "recipe") -> pd.DataFram
     profiles = {C.FS: C.FS_DEFAULT_PROFILE, C.FOIL: C.FOIL_DEFAULT_PROFILE, C.FG: C.FG_DEFAULT_PROFILE,
                 C.PRES: C.PRESS_DEFAULT_PROFILE, C.DISCHARGE: C.DISCHARGE_DEFAULT_PROFILE, C.WATER: C.WATER_DEFAULT_PROFILE,
                 C.PAA: C.PAA_DEFAULT_PROFILE}
-    recipe = RecipeCombo(recipe_dict={k: Recipe(held_until(p), k) for k, p in profiles.items()})
+    recipe = RecipeCombo(recipe_dict={k: Recipe(held_until(prof), k) for k, prof in profiles.items()})
+    if sugar is not None:
+        recipe = _SugarOverride(recipe, sugar)
     env = setup.PenSimEnv(recipe_combo=recipe, fast=False)
+    reset = env.reset
+
+    def reset_with_steps():                       # fix 4: the operators' random steps
+        observation, x = reset()
+        x.PRBS_noise_addition = _LatestList(steps)
+        return observation, x
+
+    env.reset = reset_with_steps
     env.ctrl_flags.Faults = fault
     for flag, value in STRATEGIES[strategy].items():
         setattr(env.ctrl_flags, flag, value)
+    np.random.seed(seed)                          # the operators' random steps use NumPy's global generator
     t0 = time.time()
     env.get_batches(random_seed=seed, include_raman=False)
     x = captured["x"]
-    out = pd.DataFrame({name: np.asarray(getattr(x, attr).y, float) for name, attr in CHANNEL_MAP.items()})
-    out.insert(0, "time", np.asarray(x.Fs.t, float))
-    out["fault"] = (np.asarray(x.Fault_ref.y, float) > 0).astype(int)
+    out = pd.DataFrame({name: np.asarray(getattr(x, attr).y, float).ravel()[:steps] for name, attr in CHANNEL_MAP.items()})
+    out.insert(0, "time", np.asarray(x.Fs.t, float).ravel()[:steps])
+    flag = (np.asarray(x.Fault_ref.y, float).ravel()[:steps] > 0).astype(int)
+    if sugar is not None:
+        k = np.arange(1, steps + 1)
+        flag = np.zeros(steps, int)
+        for a, b in SUGAR_STRETCHES:
+            flag[(k >= a) & (k <= b)] = 1
+    out["fault"] = flag
     out.attrs.update({"seconds": time.time() - t0, "ode calls": solver.calls, "clamped": solver.clamped,
-                      "seed": seed, "fault type": fault, "strategy": strategy})
+                      "seed": seed, "fault type": fault, "strategy": strategy, "hours": length})
     return out
 
 
+# ---------------------------------------------------------------- round 3: the generated campaign
+
+CAMPAIGN = Path(__file__).resolve().parents[1] / "data" / "raw" / "pensim_campaign"
+
+
+def campaign_plan() -> list[dict]:
+    """Every batch of the campaign, with its seed (fixed here, before generating). Lengths vary as published."""
+    groups = [("normal_recipe", 100, 1000, "recipe", 0, None), ("normal_operator", 60, 2000, "operator", 0, None),
+              ("A_recipe", 30, 3000, "recipe", 3, None), ("B_recipe", 30, 3100, "recipe", 0, FAULT_B),
+              ("C80_recipe", 15, 3200, "recipe", 0, {"kind": "scale", "factor": 0.8}),
+              ("C50_recipe", 15, 3300, "recipe", 0, {"kind": "scale", "factor": 0.5}),
+              ("C20_recipe", 15, 3400, "recipe", 0, {"kind": "scale", "factor": 0.2}),
+              ("A_operator", 15, 3500, "operator", 3, None),
+              ("aeration_recipe", 10, 4100, "recipe", 1, None), ("pressure_recipe", 10, 4200, "recipe", 2, None),
+              ("base_flow_recipe", 10, 4400, "recipe", 4, None), ("coolant_recipe", 10, 4500, "recipe", 5, None)]
+    plan = []
+    for group, n, first, strategy, fault, sugar in groups:
+        for i in range(n):
+            plan.append({"name": f"{group}_{i:03d}", "group": group, "seed": first + i, "strategy": strategy,
+                         "fault": fault, "sugar": sugar, "hours": batch_hours(first + i)})
+    return plan
+
+
+def _one(job):
+    path = CAMPAIGN / f"{job['name']}.csv.gz"
+    if path.exists():
+        return {**job, "skipped": True}
+    b = generate(job["seed"], job["fault"], job["strategy"], hours=job["hours"], sugar=job["sugar"])
+    b.to_csv(path, index=False)
+    return {**job, "seconds": round(b.attrs["seconds"], 1), "readings": len(b), "clamped": b.attrs["clamped"]}
+
+
+def _stay_awake(on: bool):
+    import os
+    if os.name == "nt":
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | (0x00000001 if on else 0))
+
+
+def run_campaign(workers: int = 8):
+    """Generate every batch of campaign_plan() not yet on disk, in parallel processes, with a running estimate."""
+    import json
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    CAMPAIGN.mkdir(parents=True, exist_ok=True)
+    plan = campaign_plan()
+    (CAMPAIGN / "plan.json").write_text(json.dumps(plan, indent=1))
+    todo = [j for j in plan if not (CAMPAIGN / f"{j['name']}.csv.gz").exists()]
+    log, t0 = [], time.time()
+    _stay_awake(True)
+    try:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_one, j) for j in todo]
+            for i, f in enumerate(as_completed(futures), 1):
+                log.append(f.result())
+                el = time.time() - t0
+                print(f"{i}/{len(todo)} batches | {el / 60:.1f} min so far | about {el / i * (len(todo) - i) / 60:.1f} min left",
+                      flush=True)
+    finally:
+        _stay_awake(False)
+    old = json.loads((CAMPAIGN / "log.json").read_text()) if (CAMPAIGN / "log.json").exists() else []
+    (CAMPAIGN / "log.json").write_text(json.dumps(old + log, indent=1))
+
+
 def main(argv=None):
-    """python -m adlab.pensim <normal batches> <faulty batches> [first seed]: writes data/raw/pensim_pilot/."""
+    """python -m adlab.pensim <normal batches> <faulty batches> [first seed]: the part C pilot (230 h batches),
+    written to data/raw/pensim_pilot/. python -m adlab.pensim campaign [workers]: the round 3 campaign."""
     import json
     import sys
-    args = (argv or sys.argv[1:]) + ["5", "5", "1"][len(argv or sys.argv[1:]):]
+    argv = list(argv if argv is not None else sys.argv[1:])
+    if argv and argv[0] == "campaign":
+        run_campaign(int(argv[1]) if len(argv) > 1 else 8)
+        return
+    args = argv + ["5", "5", "1"][len(argv):]
     n_normal, n_faulty, first = int(args[0]), int(args[1]), int(args[2])
     PILOT.mkdir(parents=True, exist_ok=True)
     log = []

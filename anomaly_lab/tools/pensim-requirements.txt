@@ -1,0 +1,7 @@
+# PenSimPy's own environment (adlab/pensim.py, results/indpensim_generation_feasibility.md).
+# PenSimPy 1.2.5 pins old versions and asks for fastodeint, a C++ extension not on PyPI, so it is installed without
+# its dependencies (see make_pensim_env.sh) and these are installed beside it. Python 3.12.
+numpy==1.26.4
+scipy==1.13.1
+pandas==2.2.3
+pytest==8.3.4

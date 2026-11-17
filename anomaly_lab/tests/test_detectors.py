@@ -131,3 +131,14 @@ def test_curved_link_residual_gives_the_same_scores_for_every_seed(rows):
     a = det.make("link_curved", seed=0).fit(fit).score(X)
     b = det.make("link_curved", seed=7).fit(fit).score(X)
     np.testing.assert_array_equal(a, b)
+
+
+def test_balanced_folds_hold_out_one_run_of_every_group_and_fall_back_without_groups():
+    from adlab import detectors as D
+    m = D.StraightLinkStageToldBalanced()
+    m.context_ = {"lengths": [10] * 6, "fit_groups": [1, 1, 1, 2, 2, 2]}
+    groups = np.repeat([1, 2], 30)
+    folds = m._folds(60)
+    assert len(folds) == 3 and all(sorted(set(groups[f])) == [1, 2] and len(f) == 20 for f in folds)
+    m.context_ = {}
+    assert len(m._folds(60)) == m.k                                   # the old blocks of time

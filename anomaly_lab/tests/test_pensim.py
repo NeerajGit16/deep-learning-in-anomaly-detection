@@ -20,12 +20,21 @@ def test_every_indpensim_channel_has_a_pensimpy_state():
     assert set(pensim.CHANNEL_MAP) == set(indpensim.CHANNELS)
 
 
-def test_generate_one_batch_when_pensimpy_is_installed():
+def test_generate_one_short_batch_when_pensimpy_is_installed():
+    """Runs only in PenSimPy's own environment (tools/make_pensim_env.sh); skipped elsewhere, as in CI."""
     pytest.importorskip("pensimpy")
-    b = pensim.generate(seed=1, fault=pensim.SUBSTRATE_FAULT)
+    b = pensim.generate(seed=1, hours=40, sugar=pensim.FAULT_B)
     assert list(b.columns) == ["time"] + indpensim.CHANNELS + ["fault"]
+    assert len(b) == 200 and b["time"].iloc[-1] == pytest.approx(40.0)
     on = b["fault"] == 1
-    assert set(np.round(b.loc[on, "sugar feed"], 6)) <= {2.0, 20.0}
+    assert on.sum() == 51 and set(np.round(b.loc[on, "sugar feed"], 6)) == {8.0}     # 20-30 h, held at 8 L/h
+
+
+def test_campaign_plan_records_a_seed_and_a_length_for_every_batch():
+    plan = pensim.campaign_plan()
+    assert len(plan) == 320 and len({j["seed"] for j in plan}) == 320
+    assert all(140 <= j["hours"] <= 320 for j in plan)
+    assert sum(j["group"] == "normal_recipe" for j in plan) == 100 and sum(j["group"] == "normal_operator" for j in plan) == 60
 
 
 def test_the_pilot_dataset_fits_on_normal_batches_and_sets_its_line_on_others():

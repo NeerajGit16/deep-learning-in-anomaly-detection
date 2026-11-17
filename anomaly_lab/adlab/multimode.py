@@ -656,7 +656,8 @@ def detector_dataset(told: bool = False, raw: Path = data.RAW) -> data.Dataset:
                             meta={"mode": m}))
     return data.Dataset("tep6_told" if told else "tep6", runs, data.TEP_CHANNELS + (["mode"] if told else []), 180.0, val,
                         calibration="matched", matched_start=FAULT_FROM,
-                        fit_lengths=[READINGS - START_UP] * (len(MODES) * len(FIT_RUNS)))
+                        fit_lengths=[READINGS - START_UP] * (len(MODES) * len(FIT_RUNS)),
+                        fit_groups=[m for m in MODES for _ in FIT_RUNS])
 
 
 def detector_methods() -> list[str]:
