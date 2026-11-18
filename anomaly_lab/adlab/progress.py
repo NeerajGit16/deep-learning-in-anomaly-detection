@@ -64,7 +64,11 @@ def stay_awake(on: bool) -> None:
 
     Loops inside loops are counted, so the request is dropped only when the outermost one ends.
     It stops the idle timer only: closing the lid or choosing Sleep still puts the computer to
-    sleep. The screen may still switch off. Does nothing on other systems.
+    sleep. Does nothing on other systems.
+
+    Round 5: the screen is kept on too. On laptops with "modern standby" (S0 low-power idle), the
+    screen switching off on its idle timer puts the whole computer into standby, and asking only
+    for the system to stay on did not stop that (a job stood still from 23:02 to 05:38).
     """
     global _awake
     _awake = max(0, _awake + (1 if on else -1))
@@ -72,8 +76,9 @@ def stay_awake(on: bool) -> None:
         return
     try:
         import ctypes
-        continuous, system_required = 0x80000000, 0x00000001
-        ctypes.windll.kernel32.SetThreadExecutionState(continuous | (system_required if _awake else 0))
+        continuous, system_required, display_required = 0x80000000, 0x00000001, 0x00000002
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            continuous | ((system_required | display_required) if _awake else 0))
     except Exception:           # never let this stop the real work
         pass
 

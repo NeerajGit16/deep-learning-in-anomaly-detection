@@ -52,3 +52,23 @@ def test_a_long_trained_autoencoder_is_stored_apart():
     X = np.zeros((10, 3))
     assert a._store(X, "x").name != b._store(X, "x").name
     assert "v2" in b._store(X, "x").name
+
+
+def test_training_audit_counts_cut_short_trainings_per_budget(tmp_path, monkeypatch):
+    import json
+    from adlab import round5
+    log = tmp_path / "log.jsonl"
+    rows = [{"model": "autoencoder", "dataset": "tep6_balanced_blocks", "passes": 100},
+            {"model": "autoencoder", "dataset": "tep6_balanced_blocks", "passes": 40},
+            {"model": "autoencoder", "dataset": "etch_without_TCP", "passes": 100},      # part 1's copies: left out
+            {"model": "autoencoder (v2)", "budget": "v2", "dataset": "etch", "passes": 1000},
+            {"model": "autoencoder (v2)", "budget": "v2", "dataset": "etch", "passes": 350},
+            {"model": "lstm (v2)", "budget": "v2", "dataset": "posctl_x", "passes": 1000}]
+    log.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    monkeypatch.setattr(deep, "LOG", log)
+    v1 = round5.training_audit()
+    assert list(v1.index) == [("tep6 (balanced folds)", "autoencoder")]
+    assert v1.iloc[0]["trainings"] == 2 and v1.iloc[0]["cut short (all 100 passes)"] == 1
+    v2 = round5.training_audit("v2", positive_control=False)
+    assert list(v2.index) == [("etch", "autoencoder")]
+    assert v2.iloc[0]["cut short (all 1,000 passes)"] == 1 and v2.iloc[0]["passes, most"] == 1000

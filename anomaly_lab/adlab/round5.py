@@ -20,6 +20,8 @@ Part 1, the metal etcher's unseen-value win (fixed before computing).
 """
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -225,6 +227,83 @@ def etch_gaps() -> pd.DataFrame:
     return pd.DataFrame(rows).set_index(["variant", "against"])
 
 
+TOP_LONG = ["deep_ae_v2", "deep_pcac_v2"]
+# Added in part 2, after seeing its results (not in part 1's design): with the long training, the PCA-plus-correction
+# autoencoder is the etcher's best detector after the unseen value check (0.56 against the straight-link residual's
+# 0.43). The same three variants are run for the two long-trained autoencoders, beside part 1's five simple top
+# detectors, so that their lead can be checked without the edited columns too. Detectors outside part 1's top five
+# are not rerun.
+
+
+def score_etch_long(verbose: bool = True):
+    """Score the long-trained autoencoders on every reduced copy of the etcher (cached)."""
+    from . import deep, progress, run
+    progress.note("round 5 part 2: long-trained autoencoders on the etcher without its setting columns")
+    plain = etch_sets()
+    for key in plain:
+        run.score_all([plain[key]], methods=TOP_LONG, n_seeds=deep.SEEDS, verbose=verbose)
+    progress.note("round 5 part 2: etcher without its setting columns scored")
+
+
+def etch_reports_long(n_boot: int = 1000) -> dict:
+    """{variant: report}: part 1's simple top detectors and the long-trained autoencoders on the etcher (cached)."""
+    def compute():
+        from . import batch, deep, deepdive, etch  # noqa: F401
+        from . import detectors as det
+        full = etch.dataset()
+        plain, told = etch_sets(), etch_sets(told=True)
+        kinds = [r.group for r in full.runs]
+        groups = [r.meta["experiment"] for r in full.runs]
+        ngroups = [r.meta["experiment"] for r in full.val_normal]
+        roles = [r.meta["role"] for r in full.val_normal]
+        methods = [m for m in TOP if m != "deep_ae"] + TOP_LONG
+        names = {m: det.REGISTRY[m].name for m in methods}
+        out = {}
+        out["all columns"] = batch.report({names[m]: _scores(etch.CACHE, m, etch.TOLD_NAME) for m in methods},
+                                          kinds, groups, ngroups, roles, n_boot=n_boot, verbose=False)
+        out["all settings left out"] = batch.report(
+            {names[m]: _scores(plain["settings"].name, m, told["settings"].name) for m in methods},
+            kinds, groups, ngroups, roles, n_boot=n_boot, verbose=False)
+        keys = [setting_of(r.meta["fault"]) for r in full.runs]
+        per_key = {}
+        for m in methods:
+            by_seed = {k: _scores(plain[k].name, m, told[k].name) for k in SETTING_COLUMNS}
+            n_seeds = min(len(v) for v in by_seed.values())
+            per_key[names[m]] = [{k: by_seed[k][s] for k in SETTING_COLUMNS} for s in range(n_seeds)]
+        out["own setting left out"] = _report_own(per_key, keys, kinds, groups, ngroups, roles, n_boot=n_boot)
+        return out
+    return structure.cached("round5_etch_reports_long", compute)
+
+
+def etch_long_table() -> pd.DataFrame:
+    """Per detector: catch rate (range) under the three variants, with the long-trained autoencoders; and the best
+    long-trained autoencoder against the best of the simple top detectors (points, range, verdict)."""
+    from . import deep
+    from . import detectors as det
+    reps = etch_reports_long()
+    long_names = {det.REGISTRY[m].name for m in TOP_LONG}
+    cols, gaps = {}, {}
+    for v, res in reps.items():
+        s = pd.DataFrame(res["summary"]).set_index("method")
+        cols[v] = {m: f"{s.loc[m, 'dr_at_1pct']:.2f} ({s.loc[m, 'dr_ci90_low']:.2f}-{s.loc[m, 'dr_ci90_high']:.2f})"
+                   for m in s.index}
+        r = s["dr_at_1pct"]
+        bd = r[[m for m in r.index if m in long_names]].idxmax()
+        simple = r[[m for m in r.index if m not in long_names]]
+        for label, pool in (("best simple", simple), ("best simple apart from the unseen value check",
+                                                       simple.drop("Unseen value check, all sensors"))):
+            bs = pool.idxmax()
+            g = deep.gap(res, bd, bs)
+            gaps[(v, label)] = {"best long-trained autoencoder": f"{bd} ({r[bd]:.2f})", "against": f"{bs} ({r[bs]:.2f})",
+                                "gap, points": f"{100 * g['gap']:+.1f} ({100 * g['low']:+.1f} to {100 * g['high']:+.1f})",
+                                "verdict": g["verdict"]}
+    rates = pd.DataFrame(cols)
+    rates.index.name = "detector"
+    gaps = pd.DataFrame(gaps).T
+    gaps.index.names = ["variant", "against"]
+    return {"rates": rates, "gaps": gaps}
+
+
 def etch_by_fault() -> pd.DataFrame:
     """The unseen value check's catch rate per kind of fault, under each variant."""
     out = {}
@@ -256,29 +335,34 @@ V1_V2 = {"deep_ae": "deep_ae_v2", "deep_lstm": "deep_lstm_v2", "deep_gdn": "deep
 REAL = ["etch", "skab", "tep_rieth", "cranfield", "tep6", "indpensim"]
 
 
-def training_audit() -> pd.DataFrame:
-    """Per dataset and deep model (notebook 09's budget): trainings, passes used, and how many were cut short."""
+def training_audit(budget: str = "v1", positive_control: bool = True) -> pd.DataFrame:
+    """Per dataset and deep model: trainings, passes used, and how many were cut short (used every pass the budget
+    allows: notebook 09's 100, or the long budget's 1,000 with budget="v2")."""
     import json
-    from .deep import LOG
+    from .deep import BUDGETS, LOG
+    cap = BUDGETS[budget]["max"]
     rows = [json.loads(line) for line in LOG.read_text(encoding="utf-8").splitlines() if line.strip()]
-    rows = [r for r in rows if r.get("budget", "v1") == "v1" and r.get("dataset") not in (None, "simulated")
-            and "_without_" not in r["dataset"]]           # part 1's etcher copies are not part of the audit
+    rows = [r for r in rows if r.get("budget", "v1") == budget and r.get("dataset") not in (None, "simulated")
+            and "_without_" not in r["dataset"]           # part 1's etcher copies are not part of the audit
+            and (positive_control or not r["dataset"].startswith("posctl"))]
+    cut = f"cut short (all {cap:,} passes)"
     out = {}
     for r in rows:
         ds = r["dataset"]
         family = ("positive control" if ds.startswith("posctl") else "generator (notebook 12)" if ds.startswith("mechanism")
-                  else ds.replace("_balanced", " (balanced folds)"))
-        key = (family, r["model"])
-        o = out.setdefault(key, {"trainings": 0, "cut short (all 100 passes)": 0, "passes": []})
+                  else re.sub(r"_balanced(_blocks|_aside)?$", " (balanced folds)", ds))
+        key = (family, r["model"].replace(" (v2)", ""))
+        o = out.setdefault(key, {"trainings": 0, cut: 0, "passes": []})
         o["trainings"] += 1
-        o["cut short (all 100 passes)"] += int(r["passes"] >= 100)
+        o[cut] += int(r["passes"] >= cap)
         o["passes"].append(r["passes"])
-    table = pd.DataFrame({k: {"trainings": v["trainings"], "cut short (all 100 passes)": v["cut short (all 100 passes)"],
-                              "share cut short": v["cut short (all 100 passes)"] / v["trainings"],
-                              "passes, median": float(np.median(v["passes"])), "passes, fewest": int(min(v["passes"]))}
+    table = pd.DataFrame({k: {"trainings": v["trainings"], cut: v[cut], "share cut short": v[cut] / v["trainings"],
+                              "passes, median": float(np.median(v["passes"])), "passes, fewest": int(min(v["passes"])),
+                              "passes, most": int(max(v["passes"]))}
                           for k, v in out.items()}).T
     table.index.names = ["dataset", "model"]
-    return table
+    order = list(dict.fromkeys(k[0] for k in out))          # each dataset's rows together, in order of first training
+    return table.loc[order]
 
 
 def _curvature(keys) -> pd.DataFrame:
@@ -343,7 +427,9 @@ def score_long(name: str, verbose: bool = True):
     """Score the long-training deep models on one dataset (cached)."""
     from . import deep, deepdive, progress, run  # noqa: F401  (deepdive registers the outputs-only autoencoder)
     progress.note(f"round 5 part 2: long training on {name}")
-    run.score_all([_target(name)], methods=long_models(name), n_seeds=deep.SEEDS, verbose=verbose)
+    ds = _target(name)
+    targets = [ds] + ([ds.matched_from] if ds.matched_from is not None else [])   # the alarm line's own runs too
+    run.score_all(targets, methods=long_models(name), n_seeds=deep.SEEDS, verbose=verbose)
     progress.note(f"round 5 part 2: long training on {name} done")
 
 
@@ -395,7 +481,7 @@ def _summary(res):
 def deep_moves() -> pd.DataFrame:
     """Every deep model's catch rate, notebook 09's training against the long one, on every dataset and campaign fault;
     and the PCA-plus-correction autoencoder beside them."""
-    from . import campaign, round4
+    from . import campaign, deepdive, round4  # noqa: F401  (deepdive registers the outputs-only autoencoders)
     from . import detectors as det
     rows = []
     pairs = [(det.REGISTRY[a].name, det.REGISTRY[b].name) for a, b in V1_V2.items()]
@@ -421,7 +507,7 @@ def deep_moves() -> pd.DataFrame:
 
 def best_deep_vs_simple() -> pd.DataFrame:
     """Per dataset and campaign fault: the best deep model against the best simple detector, round 4 against round 5."""
-    from . import campaign, deep, round4
+    from . import campaign, deep, deepdive, round4  # noqa: F401
     from . import detectors as det
     deep_names = {det.REGISTRY[k].name for k in list(deep.MODELS) + list(deep.MODELS_V2) + ["deep_ae_outputs", "deep_ae_outputs_v2"]
                   if k in det.REGISTRY}

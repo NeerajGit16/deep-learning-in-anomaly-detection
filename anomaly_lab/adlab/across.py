@@ -92,18 +92,23 @@ def _gap(res: dict, a: str, b: str) -> dict:
     return gap(res, a, b)
 
 
-def gaps(name: str, round4: bool = False) -> dict:
+def gaps(name: str, round4: bool = False, round5: bool = False) -> dict:
     """The three detection gaps on one dataset, from its report with every detector (deep.report; round4=True:
-    round 4's report, with kernel PCA on the flexible side)."""
+    round 4's report, with kernel PCA on the flexible side; round5=True: round 5's, with the long-trained deep models
+    and the PCA-plus-correction autoencoder)."""
     from . import deep
     from . import detectors as det
-    if round4:
+    keys = deep.DEEP
+    if round5:
+        from . import round5 as r5
+        res, flex, keys = r5.report_long(REPORT[name]), FLEXIBLE_R4, deep.DEEP_V2
+    elif round4:
         from . import round4 as r4
         res, flex = r4.report(REPORT[name]), FLEXIBLE_R4
     else:
         res, flex = deep.report(REPORT[name]), FLEXIBLE
     s = pd.DataFrame(res["summary"]).set_index("method")["dr_at_1pct"]
-    deep_names = [det.REGISTRY[k].name for k in deep.DEEP if det.REGISTRY[k].name in s.index]
+    deep_names = [det.REGISTRY[k].name for k in keys if det.REGISTRY[k].name in s.index]
     straight = [m for m in straight_side(flex) if m in s.index]
     flexible = [m for m in flex + deep_names if m in s.index]
     best_deep = s[deep_names].idxmax() if deep_names else None
@@ -115,12 +120,12 @@ def gaps(name: str, round4: bool = False) -> dict:
     return out
 
 
-def table(round4: bool = False) -> pd.DataFrame:
+def table(round4: bool = False, round5: bool = False) -> pd.DataFrame:
     """One row per dataset: the curved share (points, with range), the kinked gain and share, and the three gaps
-    (round4=True: on round 4's reports)."""
+    (round4=True: on round 4's reports; round5=True: round 5's, with the long-trained deep models)."""
     rows = {}
     for name in DATASETS:
-        c, k, g = curved(name), kinked(name), gaps(name, round4)
+        c, k, g = curved(name), kinked(name), gaps(name, round4, round5)
         row = {"curved share": 100 * c["curved"], "curved low": 100 * c["curved_low"], "curved high": 100 * c["curved_high"],
                "kinked gain": 100 * k["curved"], "kinked low": 100 * k["curved_low"], "kinked high": 100 * k["curved_high"],
                "kinked share of the curve": k["curved"] / c["curved"] if c["curved"] > 0.002 else np.nan}
