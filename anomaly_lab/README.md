@@ -53,6 +53,8 @@ uv run pytest                            # checks everything works
 | `adlab/folds.py` | The fold audit and balanced folds (round 4) |
 | `adlab/round4.py` | Round 4's reports: the fold audit's changes, the classic detectors, false alarms before the fault, the repeat share |
 | `adlab/posctl.py` | The positive control's generator and reports (notebook 14) |
+| `adlab/round5.py` | Round 5's checks: the metal etcher without its edited setting columns, and the deep models trained to the end (notebook 09, sections 16 and 17) |
+| `adlab/posctl2.py` | The positive control's second version: every sensor truly bent, faults of three sizes (notebook 14, sections 9 to 14) |
 | `adlab/deepdive.py`, `adlab/followup.py` | Notebook 11's ingredient detectors, and the follow-up checks of notebooks 09 and 11 |
 | `adlab/pensim.py`, `adlab/campaign.py` | Generating penicillin batches with PenSimPy (in its own environment), and the generated campaign's setups and reports |
 | `adlab/mechanism.py`, `adlab/authors_check.py` | Notebook 12's generator study; GDN and USAD against the authors' code |
@@ -60,7 +62,7 @@ uv run pytest                            # checks everything works
 | `adlab/cranfield.py` | The curvature measures for the Cranfield rig, whose runs each pass through many flow settings |
 | `adlab/multimode.py` | Fetches and loads the six-mode Tennessee Eastman runs, and puts its curvature measures together |
 | `adlab/batch.py` | Batch processes: whole batches held out, the stage of a batch in place of the mode, and alarm lines set per group of batches |
-| `adlab/deep.py` | The deep models and their twins (PyTorch, optional), their training, self-checks and reports |
+| `adlab/deep.py` | The deep models and their twins (PyTorch, optional), their training (notebook 09's budget and round 5's longer one), the PCA-plus-correction autoencoder, self-checks and reports |
 | `adlab/across.py` | The table and chart across datasets, and the kinked share |
 | `adlab/download.py` | `python -m adlab.download all` fetches every dataset that needs no login |
 | `adlab/indpensim.py` | Downloads and loads the IndPenSim batches, says what each column is, and puts their measures and detectors together |
@@ -80,7 +82,7 @@ uv run pytest                            # checks everything works
 
 Anything slow (scoring runs, the curvature measure, resampling, downloads) shows a progress bar with the time remaining. Pass `verbose=False` to switch a bar off.
 
-While a slow step runs on Windows, the computer is asked not to go to sleep by itself (closing the lid still sends it to sleep).
+While a slow step runs on Windows, the computer is asked not to go to sleep by itself, and the screen is kept on too: on laptops with Modern Standby, an idle screen turning off can pause a running job for hours even when sleep is blocked (closing the lid still sends it to sleep).
 
 To follow a job running in the background, set `ADLAB_PROGRESS_LOG=1` before starting it. It then writes one line per step to `results/progress.log`: the time, what finished, how many are done out of how many, and the estimated time left.
 
